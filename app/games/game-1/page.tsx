@@ -75,19 +75,10 @@ function drawCharacter(context: CanvasRenderingContext2D, image: HTMLCanvasEleme
   return transform.scale
 }
 
-function playEatSound(audioContext: AudioContext | null) {
-  if (!audioContext) return
-  const oscillator = audioContext.createOscillator()
-  const gain = audioContext.createGain()
-  oscillator.type = 'triangle'
-  oscillator.frequency.setValueAtTime(520, audioContext.currentTime)
-  oscillator.frequency.exponentialRampToValueAtTime(860, audioContext.currentTime + 0.12)
-  gain.gain.setValueAtTime(0.08, audioContext.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.14)
-  oscillator.connect(gain)
-  gain.connect(audioContext.destination)
-  oscillator.start()
-  oscillator.stop(audioContext.currentTime + 0.15)
+function playEffect(src: string, volume = 0.6) {
+  const audio = new Audio(src)
+  audio.volume = volume
+  audio.play().catch(() => {})
 }
 
 export default function Game1Page() {
@@ -100,7 +91,7 @@ export default function Game1Page() {
   const characterImageRef = useRef<HTMLCanvasElement | null>(null)
   const applesRef = useRef<ReturnType<typeof spawnApples>>([])
   const faceDataRef = useRef<FaceData | null>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
+  const bgmRef = useRef<HTMLAudioElement | null>(null)
   const startedAtRef = useRef(0)
   const lastFrameRef = useRef(0)
   const lastInferenceRef = useRef(0)
@@ -151,11 +142,10 @@ export default function Game1Page() {
     }
   }, [modelStatus])
 
-  useEffect(() => () => { landmarkerRef.current?.close(); audioContextRef.current?.close().catch(() => {}) }, [])
+  useEffect(() => () => { landmarkerRef.current?.close(); bgmRef.current?.pause() }, [])
 
   const prepareCamera = () => {
     if (cameraStatus === 'idle' || cameraStatus === 'error') start()
-    if (!audioContextRef.current) audioContextRef.current = new AudioContext()
     if (modelStatus === 'error') {
       setModelStatus('idle')
       setModelError('')
@@ -176,6 +166,8 @@ export default function Game1Page() {
       setBestClearMs(loadBestClearTime(window.localStorage))
       setIsNewRecord(false)
     }
+    bgmRef.current?.pause()
+    playEffect(status === 'success' ? '/sound/default-success.mp3' : status === 'timeout' ? '/sound/default-fail.mp3' : '/sound/default-end.mp3')
     stop()
     setStage('result')
   }, [stop])
@@ -192,6 +184,13 @@ export default function Game1Page() {
     initialScaleSamplesRef.current = []
     setResult(null)
     setHud({ applesEaten: 0, remainingMs: GAME_LIMIT_MS, mouthOpen: false, faceFound: false })
+    if (!bgmRef.current) {
+      bgmRef.current = new Audio('/sound/default-bgm.mp3')
+      bgmRef.current.loop = true
+      bgmRef.current.volume = 0.4
+    }
+    bgmRef.current.currentTime = 0
+    bgmRef.current.play().catch(() => {})
     setStage('playing')
   }, [videoRef])
 
@@ -231,7 +230,6 @@ export default function Game1Page() {
       applesRef.current = moveApples(applesRef.current, width, height, deltaSeconds)
       const eaten = eatApple(applesRef.current, faceData?.mouthCenter ?? null, faceData?.mouthRadius ?? null, faceData?.mouthOpen ?? false)
       applesRef.current = eaten.apples
-      if (eaten.ateApple) playEatSound(audioContextRef.current)
       applesRef.current.forEach((apple) => drawApple(context, apple.x, apple.y, apple.radius))
       const elapsedMs = timestamp - startedAtRef.current
       setHud({ applesEaten: APPLE_COUNT - applesRef.current.length, remainingMs: Math.max(0, GAME_LIMIT_MS - elapsedMs), mouthOpen: faceData?.mouthOpen ?? false, faceFound: Boolean(faceData) })
