@@ -149,8 +149,7 @@ export default function PlayerSetupPage() {
             )}
             {audioScanComplete && (
               <p className="flow-message" role="status">
-                음원 파일 {characterSoundNames.length}개가 발견됐어요.
-                {characterSoundNames.length > 0 && ` (${characterSoundNames.join(", ")}) 나만의 음원과 함께 게임을 플레이해요!`}
+                음원 파일 {characterSoundNames.length}개가 발견됐어요. 나만의 음원과 함께 게임을 플레이해요!
               </p>
             )}
           </fieldset>
