@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowLeft, BarChart3, Camera, CheckCircle2, CircleGauge, Clock3, ImageOff, RotateCcw, Trophy, XCircle } from "lucide-react";
+import { Activity, ArrowLeft, BookOpen, Camera, CheckCircle2, CircleGauge, Clock3, ImageOff, RotateCcw, Trophy, XCircle } from "lucide-react";
 import { AppShell } from "@/components/common/app-shell";
 import { Button } from "@/components/ui/button";
 import { GAME_RESULT_STORAGE_KEY, type Game3Result } from "@/lib/games/game-result";
@@ -12,6 +12,7 @@ export default function ResultsPage() {
   const [result, setResult] = useState<Game3Result | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [showExcluded, setShowExcluded] = useState(false);
+  const [showMonitoringGuide, setShowMonitoringGuide] = useState(false);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -39,7 +40,7 @@ export default function ResultsPage() {
     const errorCount = result.events.filter((event) => event.type.endsWith("_ERROR")).length;
     const excluded = successfulRounds.filter((item) => item.capturedImage && item.excludedReasons?.length);
     const candidates = successfulRounds.filter((item) => item.capturedImage && !item.excludedReasons?.length);
-    const best = [...candidates].sort((a, b) => a.responseTimeMs - b.responseTimeMs)[0];
+    const best = [...candidates].sort((a, b) => (b.sharpnessScore ?? 0) - (a.sharpnessScore ?? 0))[0];
     return { successes, averageResponse, averageInference, maxInference, averageFps, droppedInference, errorCount, excluded, candidates, best, successRate: result.successRate };
   }, [result]);
 
@@ -64,7 +65,7 @@ export default function ResultsPage() {
             <span className="result-label">CHEE-SE! COMPLETE</span>
             <div className="result-player"><img src={result.characterImage} alt="" /><span>{result.playerName}</span></div>
             <h2>{result.score}<small>P</small></h2>
-            <p>{summary.successes}번의 순간을 포착했어요. 가장 빠르고 선명한 사진을 골랐습니다.</p>
+            <p>{summary.successes}번의 순간을 포착했어요. 가장 흔들림 없고 선명한 사진을 골랐습니다.</p>
             <div className="result-actions"><Button variant="outline" size="lg" onClick={() => router.push("/games")}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={() => router.push("/games/game-3")}><RotateCcw /> 다시 하기</Button></div>
           </div>
           <div className="best-shot-card">
@@ -74,7 +75,7 @@ export default function ResultsPage() {
         </section>
 
         <section className="result-report game3-report">
-          <div className="report-heading"><div><span>PERFORMANCE REPORT</span><h3>플레이 리포트</h3></div><BarChart3 /></div>
+          <div className="report-heading"><div><span>PERFORMANCE REPORT</span><h3>플레이 리포트</h3></div><Button variant="outline" onClick={() => setShowMonitoringGuide((value) => !value)} aria-expanded={showMonitoringGuide} aria-controls="monitoring-guide"><BookOpen /> {showMonitoringGuide ? "설명서 닫기" : "용어 설명서"}</Button></div>
           <div className="score-breakdown"><div><span>성공률</span><b>{summary.successRate.toFixed(0)}</b><small>%</small></div><div><span>오류</span><b>{summary.errorCount}</b><small>건</small></div><div><span>평균 응답</span><b>{(summary.averageResponse / 1000).toFixed(2)}</b><small>sec</small></div></div>
           <div className="metric-list">
             <div className="metric-row"><span className="metric-icon memory"><CircleGauge /></span><div><b>MediaPipe 추론</b><small>평균 / 최대</small></div><strong>{summary.averageInference.toFixed(1)} ms <em>{summary.maxInference.toFixed(1)} ms</em></strong></div>
@@ -85,6 +86,16 @@ export default function ResultsPage() {
             <div className="mini-chart"><div className="chart-title"><span>회차별 응답 시간</span><em>ms</em></div><div className="chart-bars game3-bars" aria-label="회차별 응답 시간 막대차트">{result.rounds.map((item) => <i key={item.round} className={item.result} style={{ height: `${Math.max(8, (item.responseTimeMs / maxResponse) * 100)}%` }} title={`${item.round}라운드 ${item.responseTimeMs}ms`} />)}</div><div className="chart-axis"><span>R1</span><span>R{result.rounds.length}</span></div></div>
             <div className="mini-chart"><div className="chart-title"><span>MediaPipe 추론 지연</span><em>ms</em></div><svg className="latency-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="라운드별 MediaPipe 추론 지연 라인차트"><polyline points={linePoints} /></svg><div className="chart-axis"><span>R1</span><span>R{result.rounds.length}</span></div></div>
           </div>
+          {showMonitoringGuide && <div id="monitoring-guide" className="metric-list" role="region" aria-label="모니터링 용어 설명">
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>성공률</b><small>전체 진행 라운드 중 성공한 라운드의 비율입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>오류 수 / Errors</b><small>카메라, 모델, 캡처, 오디오, 자원 정리 과정에서 기록된 오류 수입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Response</b><small>라운드 시작부터 성공 또는 제한 시간 종료까지 걸린 시간입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Limit</b><small>해당 라운드에 적용된 제한 시간입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Calls</b><small>해당 라운드에서 실제로 실행한 얼굴 감지 추론 횟수입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Avg / Max Inference</b><small>추론 1회에 걸린 시간의 라운드 평균값과 최댓값입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Dropped</b><small>이전 추론 실행 중이라 중복 실행하지 않고 건너뛴 요청 수입니다.</small></div></div>
+            <div className="metric-row"><span className="metric-icon memory"><BookOpen /></span><div><b>Avg FPS</b><small>프레임별 값을 저장하지 않고 계산한 라운드 평균 FPS입니다.</small></div></div>
+          </div>}
         </section>
 
         <section className="round-report-card">
