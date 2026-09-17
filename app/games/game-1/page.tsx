@@ -1,307 +1,274 @@
-"use client";
+'use client'
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import {
-  Activity,
-  ArrowLeft,
-  BarChart3,
-  Check,
-  Clock3,
-  CircleGauge,
-  Cpu,
-  Flag,
-  MemoryStick,
-  Play,
-  RotateCcw,
-  Star,
-  Trophy,
-  Video,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { AppShell } from "@/components/common/app-shell";
-import { usePlayer } from "@/lib/player-context";
-import { useWebcam, useFrameLoop } from "@/lib/webcam";
-import { game1Meta } from "./meta";
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { ArrowLeft, Check, Clock3, RotateCcw, Trophy, Video } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { AppShell } from '@/components/common/app-shell'
+import { usePlayer } from '@/lib/player-context'
+import { useWebcam } from '@/lib/webcam'
+import { game1Meta } from './meta'
+import { APPLE_COUNT, calculateCharacterTransform, CalibrationPoints, eatApple, formatSeconds, GAME_LIMIT_MS, GameResult, getMouthData, loadBestClearTime, lockScaleAfterSamples, moveApples, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
+import styles from './game-1.module.css'
 
-// TODO(1번 게임 담당자): 이 파일 안에서만 작업하면 됩니다.
-// - 게임 컨셉이 정해지면 meta.ts의 title/description/checks/code 등을 먼저 채우기
-// - stage === "playing" 화면의 SCORE/TIMER는 더미 값입니다. useFrameLoop의 onFrame 콜백에서
-//   실제 인식/채점 로직을 연결하고, 타이머가 끝나거나 조건을 만족하면 setStage("result") 호출
-// - 결과 화면(stage === "result")의 더미 값을 실제 채점/리소스 지표로 교체
-// - 공통으로 건드릴 일이 있는 건 lib/games/types.ts (GameMeta 계약),
-//   lib/player-context.tsx (닉네임/캐릭터), lib/webcam/* (카메라 스트림) 뿐입니다.
+type Stage = 'ready' | 'calibrating' | 'playing' | 'result'
+type ModelStatus = 'idle' | 'loading' | 'ready' | 'error'
+type Landmark = { x: number; y: number }
+type FaceData = ReturnType<typeof getMouthData>
 
-type Stage = "ready" | "playing" | "result";
+const calibrationSteps: Array<{ key: keyof CalibrationPoints; label: string; description: string }> = [
+  { key: 'leftEye', label: '왼쪽 눈', description: '이미지에서 보이는 방향 기준 왼쪽 눈 중심을 클릭하세요.' },
+  { key: 'rightEye', label: '오른쪽 눈', description: '이미지에서 보이는 방향 기준 오른쪽 눈 중심을 클릭하세요.' },
+  { key: 'forehead', label: '이마', description: '이미지에서 보이는 방향 기준 이마 중앙을 클릭하세요.' },
+  { key: 'mouth', label: '입', description: '이미지에서 보이는 방향 기준 입 중심을 클릭하세요.' },
+  { key: 'chin', label: '턱', description: '이미지에서 보이는 방향 기준 턱 끝을 클릭하세요.' },
+]
 
-const statusLabel: Record<string, { title: string; description: string; tracking: string }> = {
-  idle: { title: "카메라가 꺼져 있어요", description: "버튼을 눌러 웹캠을 켜주세요", tracking: "STANDBY" },
-  requesting: { title: "카메라 연결 중...", description: "브라우저의 카메라 권한 요청을 확인해주세요", tracking: "CONNECTING" },
-  error: { title: "카메라를 사용할 수 없어요", description: "브라우저 권한 설정을 확인해주세요", tracking: "CAMERA ERROR" },
-};
+function drawApple(context: CanvasRenderingContext2D, x: number, y: number, radius: number) {
+  context.save()
+  context.fillStyle = '#ef4f5f'
+  context.beginPath()
+  context.arc(x, y, radius, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = '#fff1f2'
+  context.beginPath()
+  context.ellipse(x - radius * 0.28, y - radius * 0.3, radius * 0.2, radius * 0.33, -0.45, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = '#52b96b'
+  context.beginPath()
+  context.ellipse(x + radius * 0.22, y - radius * 0.92, radius * 0.38, radius * 0.16, -0.7, 0, Math.PI * 2)
+  context.fill()
+  context.restore()
+}
+
+function createCharacterCanvas(image: HTMLImageElement) {
+  const canvas = document.createElement('canvas')
+  const maximumSide = 1600
+  const scale = Math.min(1, maximumSide / Math.max(image.naturalWidth, image.naturalHeight))
+  canvas.width = Math.round(image.naturalWidth * scale)
+  canvas.height = Math.round(image.naturalHeight * scale)
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) return null
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+  removeCheckerboardBackground(imageData)
+  context.putImageData(imageData, 0, 0)
+  return canvas
+}
+
+function drawCharacter(context: CanvasRenderingContext2D, image: HTMLCanvasElement, calibration: CalibrationPoints, face: FaceData, lockedScale: number | null) {
+  const transform = calculateCharacterTransform(calibration, face)
+  if (!transform) return null
+  context.save()
+  context.translate(transform.targetCenter.x, transform.targetCenter.y)
+  context.rotate(transform.rotation)
+  context.scale(lockedScale ?? transform.scale, lockedScale ?? transform.scale)
+  context.translate(-transform.sourceCenter.x, -transform.sourceCenter.y)
+  context.drawImage(image, 0, 0)
+  context.restore()
+  if (face.mouthOpen) {
+    context.fillStyle = 'rgba(47, 22, 44, 0.85)'
+    context.beginPath()
+    context.arc(face.mouthCenter.x, face.mouthCenter.y, face.mouthRadius.y, 0, Math.PI * 2)
+    context.fill()
+  }
+  return transform.scale
+}
+
+function playEatSound(audioContext: AudioContext | null) {
+  if (!audioContext) return
+  const oscillator = audioContext.createOscillator()
+  const gain = audioContext.createGain()
+  oscillator.type = 'triangle'
+  oscillator.frequency.setValueAtTime(520, audioContext.currentTime)
+  oscillator.frequency.exponentialRampToValueAtTime(860, audioContext.currentTime + 0.12)
+  gain.gain.setValueAtTime(0.08, audioContext.currentTime)
+  gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.14)
+  oscillator.connect(gain)
+  gain.connect(audioContext.destination)
+  oscillator.start()
+  oscillator.stop(audioContext.currentTime + 0.15)
+}
 
 export default function Game1Page() {
-  const router = useRouter();
-  const { playerName, characterImage } = usePlayer();
-  const [stage, setStage] = useState<Stage>("ready");
-  const Icon = game1Meta.icon;
-
-  const { videoRef, status, error, start, stop } = useWebcam({ autoStart: false });
-  const { fps } = useFrameLoop(videoRef, { enabled: status === "active" });
+  const router = useRouter()
+  const { playerName, characterImage } = usePlayer()
+  const { videoRef, status: cameraStatus, error: cameraError, start, stop } = useWebcam({ autoStart: false })
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const calibrationImageRef = useRef<HTMLImageElement | null>(null)
+  const landmarkerRef = useRef<{ detectForVideo: (video: HTMLVideoElement, timestamp: number) => { faceLandmarks: Landmark[][] }; close: () => void } | null>(null)
+  const characterImageRef = useRef<HTMLCanvasElement | null>(null)
+  const applesRef = useRef<ReturnType<typeof spawnApples>>([])
+  const faceDataRef = useRef<FaceData | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const startedAtRef = useRef(0)
+  const lastFrameRef = useRef(0)
+  const lastInferenceRef = useRef(0)
+  const endedRef = useRef(false)
+  const lockedCharacterScaleRef = useRef<number | null>(null)
+  const initialScaleSamplesRef = useRef<number[]>([])
+  const [stage, setStage] = useState<Stage>('ready')
+  const [modelStatus, setModelStatus] = useState<ModelStatus>('idle')
+  const [modelError, setModelError] = useState('')
+  const [calibration, setCalibration] = useState<Partial<CalibrationPoints>>({})
+  const [result, setResult] = useState<GameResult | null>(null)
+  const [bestClearMs, setBestClearMs] = useState<number | null>(null)
+  const [isNewRecord, setIsNewRecord] = useState(false)
+  const [hud, setHud] = useState({ applesEaten: 0, remainingMs: GAME_LIMIT_MS, mouthOpen: false, faceFound: false })
+  const [calibrationImageSize, setCalibrationImageSize] = useState({ width: 0, height: 0 })
+  const [calibrationCharacterImage, setCalibrationCharacterImage] = useState(characterImage)
+  const calibrationComplete = calibrationSteps.every((step) => calibration[step.key])
 
   useEffect(() => {
-    if (stage === "result") {
-      stop();
+    const image = new Image()
+    image.src = characterImage
+    image.onload = () => {
+      try {
+        const canvas = createCharacterCanvas(image)
+        if (!canvas) return
+        characterImageRef.current = canvas
+        setCalibrationCharacterImage(canvas.toDataURL('image/png'))
+      } catch {
+        characterImageRef.current = null
+        setCalibrationCharacterImage(characterImage)
+      }
     }
-  }, [stage, stop]);
+    return () => { characterImageRef.current = null }
+  }, [characterImage])
 
-  return (
-    <AppShell activeStep={stage === "result" ? 3 : 2} stageKey={stage}>
-      <div style={{ "--choice": game1Meta.accent } as React.CSSProperties}>
-        {stage === "ready" && (
-          <div className="ready-layout">
-            <div className="camera-preview">
-              <div className="camera-bar">
-                <span>
-                  <i /> CAMERA PREVIEW
-                </span>
-                <small>1280 × 720</small>
-              </div>
-              <div className="camera-body">
-                <video ref={videoRef} className="camera-video" autoPlay playsInline muted hidden={status !== "active"} />
-                <div className="frame-corners">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                </div>
-                {status !== "active" && (
-                  <div className={`camera-placeholder${status === "error" ? " is-error" : ""}`}>
-                    <Icon />
-                    <b>{statusLabel[status]?.title ?? statusLabel.idle.title}</b>
-                    <span>{status === "error" && error ? error : statusLabel[status]?.description ?? statusLabel.idle.description}</span>
-                    {status !== "requesting" && (
-                      <Button size="lg" className="camera-start-button" onClick={start}>
-                        <Video fill="currentColor" /> {status === "error" ? "다시 시도" : "웹캠 켜기"}
-                      </Button>
-                    )}
-                  </div>
-                )}
-                <div className="tracking-label">
-                  <span /> {status === "active" ? "TRACKING READY" : statusLabel[status]?.tracking ?? statusLabel.idle.tracking}
-                </div>
-              </div>
-              <div className="camera-stats">
-                <span>
-                  <Cpu /> CPU <b>--%</b>
-                </span>
-                <span>
-                  <CircleGauge /> FPS <b>{status === "active" ? fps.toFixed(1) : "--.-"}</b>
-                </span>
-                <span>
-                  <Clock3 /> INFERENCE <b>-- ms</b>
-                </span>
-              </div>
-            </div>
+  const initializeModel = useCallback(async () => {
+    if (landmarkerRef.current || modelStatus === 'loading') return
+    setModelStatus('loading')
+    setModelError('')
+    try {
+      const { FaceLandmarker, FilesetResolver } = await import('@mediapipe/tasks-vision')
+      const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm')
+      landmarkerRef.current = await FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: '/mediapipe/face_landmarker.task' }, runningMode: 'VIDEO', numFaces: 1, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5 })
+      setModelStatus('ready')
+    } catch (error: unknown) {
+      setModelStatus('error')
+      setModelError(error instanceof Error ? error.message : '얼굴 인식 엔진을 준비하지 못했습니다.')
+    }
+  }, [modelStatus])
 
-            <div className="ready-info">
-              <span className="screen-count">03 / 03 · {game1Meta.code}</span>
-              <div className="ready-title">
-                <span>
-                  <Icon />
-                </span>
-                <div>
-                  <small>{game1Meta.tag}</small>
-                  <h2>{game1Meta.title}</h2>
-                </div>
-              </div>
-              <p className="ready-description">{game1Meta.description}</p>
+  useEffect(() => () => { landmarkerRef.current?.close(); audioContextRef.current?.close().catch(() => {}) }, [])
 
-              <div className="ready-player">
-                <span>
-                  <img src={characterImage} alt="" />
-                </span>
-                <div>
-                  <small>PLAYER</small>
-                  <b>{playerName}</b>
-                </div>
-                <em>실제 게임 시간으로 변경하기</em>
-              </div>
+  const prepareCamera = () => {
+    if (cameraStatus === 'idle' || cameraStatus === 'error') start()
+    if (!audioContextRef.current) audioContextRef.current = new AudioContext()
+    if (modelStatus === 'error') {
+      setModelStatus('idle')
+      setModelError('')
+    }
+    void initializeModel()
+  }
 
-              <div className="check-list">
-                <h3>시작 전 체크</h3>
-                {game1Meta.checks.map((item) => (
-                  <div key={item}>
-                    <span>
-                      <Check />
-                    </span>
-                    {item}
-                  </div>
-                ))}
-              </div>
+  const finishGame = useCallback((status: GameResult['status'], elapsedMs: number) => {
+    if (endedRef.current) return
+    endedRef.current = true
+    const gameResult = { status, elapsedMs: Math.min(elapsedMs, GAME_LIMIT_MS), applesEaten: APPLE_COUNT - applesRef.current.length }
+    setResult(gameResult)
+    if (status === 'success') {
+      const record = saveBestClearTime(window.localStorage, gameResult.elapsedMs)
+      setBestClearMs(record.bestClearMs)
+      setIsNewRecord(record.isNewRecord)
+    } else {
+      setBestClearMs(loadBestClearTime(window.localStorage))
+      setIsNewRecord(false)
+    }
+    stop()
+    setStage('result')
+  }, [stop])
 
-              <div className="ready-actions">
-                <Button variant="ghost" size="lg" onClick={() => router.push("/games")}>
-                  <ArrowLeft /> 다른 게임
-                </Button>
-                <Button size="lg" className="start-game" disabled={status !== "active"} onClick={() => setStage("playing")}>
-                  <Play fill="currentColor" /> 게임 시작
-                </Button>
-              </div>
-              {status !== "active" && <p className="ready-description">웹캠을 켜야 게임을 시작할 수 있어요.</p>}
-            </div>
-          </div>
-        )}
+  const beginPlaying = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return
+    applesRef.current = spawnApples(video.videoWidth || 1280, video.videoHeight || 720)
+    startedAtRef.current = performance.now()
+    lastFrameRef.current = 0
+    lastInferenceRef.current = 0
+    endedRef.current = false
+    lockedCharacterScaleRef.current = null
+    initialScaleSamplesRef.current = []
+    setResult(null)
+    setHud({ applesEaten: 0, remainingMs: GAME_LIMIT_MS, mouthOpen: false, faceFound: false })
+    setStage('playing')
+  }, [videoRef])
 
-        {stage === "playing" && (
-          <div className="play-layout">
-            <div className="play-camera">
-              <video ref={videoRef} className="camera-video" autoPlay playsInline muted />
-              <div className="play-hud">
-                <div className="play-hud-item">
-                  <small>SCORE</small>
-                  <b>0</b>
-                </div>
-                <div className="play-hud-timer">
-                  <Clock3 /> 00:60
-                </div>
-              </div>
-              <div className="play-hint">여기에 실제 게임 화면(타깃, 가이드, 인식 결과 등)을 그리면 됩니다.</div>
-            </div>
-            <div className="play-actions">
-              <Button size="lg" variant="outline" onClick={() => setStage("result")}>
-                <Flag /> 게임 종료
-              </Button>
-            </div>
-          </div>
-        )}
+  useEffect(() => {
+    if (stage !== 'playing') return
+    let animationFrame = 0
+    const render = (timestamp: number) => {
+      const canvas = canvasRef.current
+      const video = videoRef.current
+      const context = canvas?.getContext('2d')
+      if (!canvas || !video || !context || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) { animationFrame = requestAnimationFrame(render); return }
+      const width = video.videoWidth || 1280
+      const height = video.videoHeight || 720
+      if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height }
+      context.save()
+      context.translate(width, 0)
+      context.scale(-1, 1)
+      context.drawImage(video, 0, 0, width, height)
+      context.restore()
+      if (landmarkerRef.current && timestamp - lastInferenceRef.current >= 50) {
+        lastInferenceRef.current = timestamp
+        const landmarks = landmarkerRef.current.detectForVideo(video, timestamp).faceLandmarks[0]
+        faceDataRef.current = landmarks ? getMouthData(landmarks, width, height) : null
+      }
+      const faceData = faceDataRef.current
+      const character = characterImageRef.current
+      if (faceData && character && calibrationComplete) {
+        const suggestedScale = drawCharacter(context, character, calibration as CalibrationPoints, faceData, lockedCharacterScaleRef.current)
+        if (lockedCharacterScaleRef.current === null) {
+          const lock = lockScaleAfterSamples(initialScaleSamplesRef.current, suggestedScale)
+          initialScaleSamplesRef.current = lock.samples
+          lockedCharacterScaleRef.current = resolveLockedScale(lockedCharacterScaleRef.current, lock.lockedScale)
+        }
+      }
+      const deltaSeconds = lastFrameRef.current ? Math.min((timestamp - lastFrameRef.current) / 1000, 0.1) : 0
+      lastFrameRef.current = timestamp
+      applesRef.current = moveApples(applesRef.current, width, height, deltaSeconds)
+      const eaten = eatApple(applesRef.current, faceData?.mouthCenter ?? null, faceData?.mouthRadius ?? null, faceData?.mouthOpen ?? false)
+      applesRef.current = eaten.apples
+      if (eaten.ateApple) playEatSound(audioContextRef.current)
+      applesRef.current.forEach((apple) => drawApple(context, apple.x, apple.y, apple.radius))
+      const elapsedMs = timestamp - startedAtRef.current
+      setHud({ applesEaten: APPLE_COUNT - applesRef.current.length, remainingMs: Math.max(0, GAME_LIMIT_MS - elapsedMs), mouthOpen: faceData?.mouthOpen ?? false, faceFound: Boolean(faceData) })
+      if (applesRef.current.length === 0) { finishGame('success', elapsedMs); return }
+      if (elapsedMs >= GAME_LIMIT_MS) { finishGame('timeout', elapsedMs); return }
+      animationFrame = requestAnimationFrame(render)
+    }
+    animationFrame = requestAnimationFrame(render)
+    return () => cancelAnimationFrame(animationFrame)
+  }, [calibration, calibrationComplete, finishGame, stage, videoRef])
 
-        {stage === "result" && (
-          <div className="result-layout">
-            <div className="result-celebration">
-              <span className="confetti confetti-one" />
-              <span className="confetti confetti-two" />
-              <span className="confetti confetti-three" />
-              <span className="confetti confetti-four" />
-              <span className="result-label">GAME COMPLETE!</span>
-              <div className="trophy-bubble">
-                <Trophy />
-              </div>
-              <div className="result-player">
-                <img src={characterImage} alt="" />
-                <span>{playerName}</span>
-              </div>
-              <h2>
-                8,420<small>P</small>
-              </h2>
-              <div className="result-rank">
-                <Star fill="currentColor" /> RANK A
-              </div>
-              <p>표정을 빠르고 정확하게 따라 했어요!</p>
-              <div className="result-actions">
-                <Button variant="outline" size="lg" onClick={() => router.push("/games")}>
-                  <ArrowLeft /> 다른 게임
-                </Button>
-                <Button size="lg" onClick={() => setStage("ready")}>
-                  <RotateCcw /> 다시 하기
-                </Button>
-              </div>
-            </div>
+  const addCalibrationPoint = (event: React.MouseEvent<HTMLImageElement>) => {
+    const image = calibrationImageRef.current
+    const step = calibrationSteps.find((item) => !calibration[item.key])
+    if (!image || !step || !image.naturalWidth || !image.naturalHeight) return
+    const bounds = image.getBoundingClientRect()
+    setCalibration((points) => ({ ...points, [step.key]: { x: ((event.clientX - bounds.left) / bounds.width) * image.naturalWidth, y: ((event.clientY - bounds.top) / bounds.height) * image.naturalHeight } }))
+  }
+  const undoCalibration = () => {
+    const latest = calibrationSteps.filter((step) => calibration[step.key]).at(-1)
+    if (!latest) return
+    setCalibration((points) => { const next = { ...points }; delete next[latest.key]; return next })
+  }
+  const startFlow = () => { if (calibrationComplete) beginPlaying(); else setStage('calibrating') }
+  const currentStep = calibrationSteps.find((step) => !calibration[step.key])
+  const cameraReady = cameraStatus === 'active' && modelStatus === 'ready'
 
-            <div className="result-report">
-              <div className="report-heading">
-                <div>
-                  <span>PERFORMANCE REPORT</span>
-                  <h3>플레이 리포트</h3>
-                </div>
-                <BarChart3 />
-              </div>
-              <div className="score-breakdown">
-                <div>
-                  <span>성공</span>
-                  <b>24</b>
-                  <small>회</small>
-                </div>
-                <div>
-                  <span>정확도</span>
-                  <b>92</b>
-                  <small>%</small>
-                </div>
-                <div>
-                  <span>최대 콤보</span>
-                  <b>11</b>
-                  <small>x</small>
-                </div>
-              </div>
-              <div className="metric-list">
-                <div className="metric-row">
-                  <span className="metric-icon cpu">
-                    <Cpu />
-                  </span>
-                  <div>
-                    <b>CPU Usage</b>
-                    <small>Average / Peak</small>
-                  </div>
-                  <strong>
-                    42.3% <em>71.2%</em>
-                  </strong>
-                </div>
-                <div className="metric-row">
-                  <span className="metric-icon memory">
-                    <MemoryStick />
-                  </span>
-                  <div>
-                    <b>Memory</b>
-                    <small>Average / Peak</small>
-                  </div>
-                  <strong>
-                    382 MB <em>451 MB</em>
-                  </strong>
-                </div>
-                <div className="metric-row">
-                  <span className="metric-icon fps">
-                    <Activity />
-                  </span>
-                  <div>
-                    <b>Frame Rate</b>
-                    <small>Average / Minimum</small>
-                  </div>
-                  <strong>
-                    28.7 <em>21.4 FPS</em>
-                  </strong>
-                </div>
-              </div>
-              <div className="mini-chart">
-                <div className="chart-title">
-                  <span>60초 성능 타임라인</span>
-                  <em>CPU</em>
-                </div>
-                <div className="chart-bars" aria-label="게임 중 CPU 사용량 예시 그래프">
-                  {[35, 48, 42, 61, 55, 72, 50, 46, 58, 43, 39, 47, 36, 44, 41, 32, 38, 35].map((value, index) => (
-                    <i key={index} style={{ height: `${value}%` }} />
-                  ))}
-                </div>
-                <div className="chart-axis">
-                  <span>0s</span>
-                  <span>30s</span>
-                  <span>60s</span>
-                </div>
-              </div>
-              <div className="report-foot">
-                <span>
-                  <Clock3 /> 60.2 sec
-                </span>
-                <span>
-                  <Video /> 1,724 frames
-                </span>
-                <span>
-                  <CircleGauge /> 17.8 ms avg
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </AppShell>
-  );
+  return <AppShell activeStep={stage === 'result' ? 3 : 2} stageKey={stage}>
+    <video ref={videoRef} className={styles.hiddenVideo} autoPlay playsInline muted />
+    <div className={styles.game} style={{ '--choice': game1Meta.accent } as React.CSSProperties}>
+      {stage === 'ready' && <section className={styles.ready}>
+        <div className={styles.preview}><Video aria-hidden="true" /><strong>{cameraStatus === 'error' ? '카메라를 사용할 수 없어요' : cameraStatus === 'active' ? '카메라가 준비됐어요' : '웹캠을 준비해주세요'}</strong><span>{cameraStatus === 'error' ? cameraError : '버튼을 눌러 카메라 권한을 허용해주세요.'}</span><Button size="lg" onClick={prepareCamera} disabled={cameraStatus === 'requesting'}><Video fill="currentColor" />{cameraStatus === 'error' ? '다시 시도' : '웹캠 켜기'}</Button>{modelStatus === 'loading' && <p>얼굴 인식 엔진을 준비하는 중이에요.</p>}{modelStatus === 'error' && <p className={styles.error}>인식 엔진 오류: {modelError}</p>}</div>
+        <div className={styles.readyInfo}><span className="screen-count">03 / 03 · {game1Meta.code}</span><h1>{game1Meta.title}</h1><p>{game1Meta.description}</p><p className={styles.player}>플레이어 <b>{playerName}</b></p><ul>{game1Meta.checks.map((item) => <li key={item}><Check />{item}</li>)}</ul><div className={styles.actions}><Button variant="ghost" size="lg" onClick={() => router.push('/games')}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={startFlow} disabled={!cameraReady}><Video fill="currentColor" /> 게임 시작</Button></div>{!cameraReady && <small>카메라와 얼굴 인식 엔진이 준비되면 게임을 시작할 수 있어요.</small>}</div>
+      </section>}
+      {stage === 'calibrating' && <section className={styles.calibration}><div><span className="screen-count">캐릭터 보정 · {Object.keys(calibration).length} / 5</span><h1>캐릭터 얼굴 위치를<br />알려주세요.</h1><p>{currentStep?.description ?? '이미지에서 보이는 방향을 기준으로 왼쪽부터 찍어주세요.'}</p><div className={styles.calibrationSteps}>{calibrationSteps.map((step, index) => <span key={step.key} className={calibration[step.key] ? styles.done : ''}>{index + 1}. 화면 기준 {step.label}</span>)}</div><div className={styles.actions}><Button variant="outline" onClick={undoCalibration} disabled={!Object.keys(calibration).length}>이전 점</Button><Button onClick={beginPlaying} disabled={!calibrationComplete}>보정 완료하고 시작</Button></div></div><div className={styles.calibrationImageWrap}><div className={styles.calibrationImageStage}><img ref={calibrationImageRef} src={calibrationCharacterImage} alt="캐릭터 기준점 설정" onClick={addCalibrationPoint} onLoad={(event) => setCalibrationImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{calibrationSteps.map((step, index) => { const point = calibration[step.key]; return point && calibrationImageSize.width ? <i key={step.key} style={{ left: `${(point.x / calibrationImageSize.width) * 100}%`, top: `${(point.y / calibrationImageSize.height) * 100}%` }}>{index + 1}</i> : null })}</div></div></section>}
+      {stage === 'playing' && <section className={styles.playing}><div className={styles.canvasWrap}><canvas ref={canvasRef} aria-label="사과 먹기 게임 화면" /><div className={styles.hud}><strong>사과 <b>{hud.applesEaten}</b> / {APPLE_COUNT}</strong><strong><Clock3 /> {Math.ceil(hud.remainingMs / 1000)}초</strong></div><div className={styles.status}>{hud.faceFound ? (hud.mouthOpen ? '입 열림 · 사과를 먹을 수 있어요!' : '입을 벌려 사과를 먹어보세요') : '얼굴을 찾는 중이에요'}</div></div><Button variant="outline" onClick={() => finishGame('stopped', performance.now() - startedAtRef.current)}>게임 그만하기</Button></section>}
+      {stage === 'result' && result && <section className={styles.result}><Trophy /><span>{result.status === 'success' ? 'GAME CLEAR!' : result.status === 'timeout' ? 'TIME UP' : 'GAME STOPPED'}</span><h1>{result.status === 'success' ? `${formatSeconds(result.elapsedMs)}초 만에 성공!` : `${result.applesEaten}개의 사과를 먹었어요`}</h1><p>{isNewRecord ? '새 최고 기록이에요!' : bestClearMs ? `내 최고 기록은 ${formatSeconds(bestClearMs)}초예요.` : '다시 도전해서 모든 사과를 먹어보세요.'}</p><div className={styles.resultStats}><b>{result.applesEaten}<small>먹은 사과</small></b><b>{formatSeconds(result.elapsedMs)}<small>플레이 시간(초)</small></b></div><div className={styles.actions}><Button variant="outline" size="lg" onClick={() => router.push('/games')}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={() => { setStage('ready'); setResult(null) }}><RotateCcw /> 다시 하기</Button></div></section>}
+    </div>
+  </AppShell>
 }

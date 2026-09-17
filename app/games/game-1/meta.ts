@@ -1,16 +1,6 @@
-import { Gamepad2 } from "lucide-react";
-import type { GameMeta } from "@/lib/games/types";
+import { Apple } from 'lucide-react'
+import type { GameMeta } from '@/lib/games/types'
 
-// 게임 컨셉이 아직 정해지지 않아 플레이스홀더 값입니다.
-// 담당자가 정해지고 컨셉이 확정되면 title/short/description/tag/code/icon/checks를 실제 내용으로 교체하세요.
 export const game1Meta: GameMeta = {
-  slug: "game-1",
-  code: "GAME_01",
-  title: "게임 1",
-  short: "게임 내용은 준비 중이에요",
-  description: "이 자리에 어떤 게임이 들어갈지는 아직 정해지지 않았습니다. 컨셉이 확정되면 이 설명도 함께 업데이트될 예정이에요.",
-  tag: "TBD",
-  icon: Gamepad2,
-  accent: "#9eff3e",
-  checks: ["웹캠이 잘 보이는 위치에 앉기", "주변을 밝게 유지하기", "게임 내용은 추후 공개됩니다"],
-};
+  slug: 'game-1', code: 'GAME_01', title: '사과 먹기', short: '입을 벌려 움직이는 사과를 먹어보세요', description: '캐릭터 얼굴을 내 얼굴에 맞춘 뒤, 60초 안에 사과 10개를 모두 먹는 웹캠 게임이에요.', tag: 'FACE TRACKING', icon: Apple, accent: '#ff6574', checks: ['웹캠 권한을 허용하기', '얼굴이 화면에 잘 보이게 하기', '캐릭터 이미지의 얼굴 기준점 5곳 지정하기'],
+}
