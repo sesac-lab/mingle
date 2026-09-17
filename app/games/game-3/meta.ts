@@ -1,16 +1,19 @@
-import { Puzzle } from "lucide-react";
+import { FaceSlightlySmilingPlus } from "lucide-react";
 import type { GameMeta } from "@/lib/games/types";
 
-// 게임 컨셉이 아직 정해지지 않아 플레이스홀더 값입니다.
-// 담당자가 정해지고 컨셉이 확정되면 title/short/description/tag/code/icon/checks를 실제 내용으로 교체하세요.
 export const game3Meta: GameMeta = {
   slug: "game-3",
   code: "GAME_03",
-  title: "게임 3",
-  short: "게임 내용은 준비 중이에요",
-  description: "이 자리에 어떤 게임이 들어갈지는 아직 정해지지 않았습니다. 컨셉이 확정되면 이 설명도 함께 업데이트될 예정이에요.",
-  tag: "TBD",
-  icon: Puzzle,
+  title: "CHEE-SE!",
+  short: "제한 시간 안에 캐릭터와 함께 치-즈!",
+  description: "제한 시간 안에 얼굴을 FACE ZONE 안으로 옮겨 캐릭터와 함께 사진을 촬영하는 게임입니다. 빠르게 위치를 맞추고 다양한 포즈를 완성해 가장 멋진 베스트 샷을 남겨보세요!",
+  tag: "SNAP IT WITH US!",
+  icon: FaceSlightlySmilingPlus,
   accent: "#73d8ff",
-  checks: ["웹캠이 잘 보이는 위치에 앉기", "주변을 밝게 유지하기", "게임 내용은 추후 공개됩니다"],
+  checks: [
+    "웹캠에 얼굴이 잘 보이도록 준비하기",
+    "얼굴이 잘 인식되도록 주변을 밝게 유지하기",
+    "제한 시간 안에 FACE ZONE으로 빠르게 이동하기",
+    "캐릭터와 함께 다양한 포즈로 베스트 샷 남기기",
+  ],
 };
