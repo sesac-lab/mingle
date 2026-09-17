@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // MediaPipe's Emscripten runtime is copied verbatim for offline loading.
+    "public/mediapipe/*.js",
   ]),
   {
     files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],
