@@ -20,3 +20,6 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 *.tsbuildinfo
+
+# playwright-mcp 자동 생성 디버그 산출물
+.playwright-mcp/
