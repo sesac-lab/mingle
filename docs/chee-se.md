@@ -772,6 +772,8 @@ GAME 3 전용 결과 페이지를 별도로 생성하지 않는다.
 
 성공 사진 중 베스트 사진 후보를 선정한다.
 
+베스트 사진 후보 중, 가장 선명한 사진을 최종 베스트 사진으로 선정한다.
+
 다음 조건에 해당하는 사진은 후보에서 제외한다.
 
 ---
@@ -856,192 +858,83 @@ Face Mesh는 베스트 사진 판정 용도로 사용하며 기본 게임 성공
 
 ---
 
-# 30. 작업 모니터링
+# 30. 작업·자원 모니터링
 
-GAME 3 실행 데이터를 활용하여 작업 모니터링 정보를 제공한다.
+목표: GAME 3의 **가용성·성능·자원 부하·오류·자원 해제**를 최소 데이터로 진단한다.
 
-다음 항목을 수집한다.
+## 필수 지표
+
+- `successRate`, `avgResponseMs`
+- `avgInferenceMs`, `maxInferenceMs`
+- `detectionCalls`, `droppedInferenceCount`
+- `avgFps`, `errorCount`
+- `cameraReadyMs`, `modelReadyMs`
+
+라운드 데이터에는 아래 집계값만 추가/유지한다.
+
+```ts
+{
+  round, result, scoreDelta, totalScore,
+  responseTimeMs, timeLimitMs, detectionCalls,
+  avgInferenceMs, maxInferenceMs, droppedInferenceCount,
+  avgFps, errorCount
+}
+```
+
+- 프레임별 FPS·추론 로그·랜드마크·Bounding Box 좌표는 저장하지 않는다.
+- CPU/RAM/GPU 사용률 직접 수집은 브라우저 제약과 구현 비용 때문에 필수 범위에서 제외한다.
 
 ---
 
-## 회차별 응답 시간
+# 31. 운영 상태 판정
 
-각 라운드에서 FACE ZONE 생성 이후 성공 판정까지 걸린 시간을 기록한다.
+다음 상태만 확인한다.
 
-단위:
+- **Camera**: 연결 / 오류
+- **Model**: 준비 / 오류
+- **Performance**: 응답 시간, 평균·최대 추론 지연, 평균 FPS
+- **Load**: Detection 호출 수, dropped inference 수
+- **Round**: 시작 → 성공 / timeout → 종료
+- **Cleanup**: MediaStream·Timer·AnimationFrame·Audio 해제 여부
 
-```text
-ms
-```
-
-또는 화면에서는:
-
-```text
-초
-```
-
-로 변환할 수 있다.
-
----
-
-## MediaPipe 추론 지연
-
-각 얼굴 감지 호출에 대해 가능하면 다음을 기록한다.
-
-```text
-inferenceStart
-inferenceEnd
-inferenceLatency
-```
-
-회차별 평균 또는 대표 지연 시간을 저장한다.
-
----
-
-## 운영 지표
-
-최소 다음 값을 계산한다.
-
-- 성공 횟수
-- 실패 횟수
-- 성공률
-- 총 라운드
-- 누적 점수
-- 평균 응답 시간
-- 오류 수
-- MediaPipe 평균 추론 지연
-
-성공률:
-
-```text
-성공 횟수 / 완료 라운드 × 100
-```
-
----
-
-# 31. 회차별 운영 테이블
-
-최소 다음 필드를 기록한다.
-
-```text
-Round
-Result
-Score Delta
-Total Score
-Response Time
-Time Limit
-Detection Calls
-Inference Latency
-Error Count
-```
+이전 inference가 끝나지 않았으면 새 호출은 skip하고 `droppedInferenceCount`를 증가시킨다.
 
 ---
 
 # 32. 시스템 이벤트 로그
 
-GAME 3에서 발생하는 주요 시스템 상태를 로그로 기록한다.
-
-예:
+상태 변화와 오류만 기록한다. 반복적인 프레임 이벤트는 저장하지 않는다.
 
 ```text
-CAMERA_REQUESTED
-CAMERA_CONNECTED
-CAMERA_ERROR
-
-MODEL_LOADING
-MODEL_READY
-MODEL_ERROR
-
-GAME_STARTED
-ROUND_STARTED
-
-FACE_DETECTED
-ZONE_SUCCESS
-ZONE_TIMEOUT
-
-CAPTURE_SUCCESS
-CAPTURE_ERROR
-
-AUDIO_STARTED
-AUDIO_ERROR
-
-ROUND_ENDED
-
-GAME_ENDED
+CAMERA_CONNECTED | CAMERA_ERROR
+MODEL_READY | MODEL_ERROR
+GAME_STARTED | GAME_ENDED
+ROUND_STARTED | ROUND_SUCCESS | ROUND_TIMEOUT | ROUND_ENDED
+CAPTURE_ERROR | AUDIO_ERROR
+RESOURCE_CLEANUP | RESOURCE_CLEANUP_ERROR
 ```
-
-로그 데이터 예:
 
 ```ts
-{
-  timestamp: number;
-  type: string;
-  round?: number;
-  message?: string;
-}
+{ timestamp, type, round?, durationMs?, message? }
 ```
+
+얼굴 좌표·랜드마크·이미지 원본 등 개인정보성 데이터는 운영 로그에 저장하지 않는다.
 
 ---
 
-# 33. 차트
+# 33. 모니터링 UI
 
-작업 모니터링 화면 또는 기존 결과 페이지의 지원 구조를 활용하여 다음 데이터를 시각화할 수 있도록 준비한다.
+기존 결과/차트 컴포넌트를 재사용하고 신규 라이브러리는 설치하지 않는다.
 
-## 차트 1
+필수 표시:
 
-```text
-회차별 응답 시간
-```
+1. **운영 요약**: 성공률, 오류 수, 평균 응답, 평균/최대 추론, 평균 FPS, dropped inference
+2. **응답 시간 차트**: Round × Response Time
+3. **추론 지연 차트**: Round × Avg Inference
+4. **회차 테이블**: `Round | Result | Response | Limit | Calls | Avg/Max Inference | Dropped | Avg FPS | Errors`
+5. **이벤트 로그**: 오류·주요 상태 변화
 
-형태:
-
-```text
-막대차트
-```
-
-X축:
-
-```text
-Round
-```
-
-Y축:
-
-```text
-Response Time
-```
-
----
-
-## 차트 2
-
-```text
-MediaPipe 추론 지연 추이
-```
-
-형태:
-
-```text
-라인 차트
-```
-
-X축:
-
-```text
-Detection 순서 또는 Round
-```
-
-Y축:
-
-```text
-Inference Latency
-```
-
-기존 프로젝트에 차트 라이브러리가 존재하면 해당 라이브러리를 사용한다.
-
-GAME 3 구현만을 위해 임의로 새로운 차트 라이브러리를 설치하지 않는다.
-
-필요할 경우 사용자에게 먼저 보고한다.
+공통 결과 페이지 수정이 필요하면 사전 승인 후 진행한다.
 
 ---
 
@@ -1299,7 +1192,7 @@ FACE ZONE 생성
 
 ### Step 15
 
-작업 모니터링 데이터 수집
+작업·자원 모니터링 데이터 수집
 
 ### Step 16
 
@@ -1351,6 +1244,8 @@ FACE ZONE 생성
 - 베스트 사진 표시
 - 제외 사진 토글
 - 운영 지표 생성
+- 평균 FPS / dropped inference 수집
+- 자원 해제 확인
 - 이벤트 로그 생성
 
 ---
@@ -1395,7 +1290,7 @@ GAME 3 구현
 - 오디오: 완료
 - 결과 연동: 완료
 - 베스트 사진: 완료
-- 작업 모니터링: 완료
+- 작업·자원 모니터링: 완료
 
 공통 영역 수정
 - 없음
@@ -1439,7 +1334,8 @@ GAME 3 구현
 - 기존 결과 페이지 연동
 - 베스트 사진 필터링 동작
 - 제외 사진 확인 가능
-- 작업 모니터링 데이터 생성
+- 작업·자원 모니터링 데이터 생성
+- 게임 종료 시 MediaStream/Timer/AnimationFrame/Audio 해제
 - GAME 1 기능 영향 없음
 - GAME 2 기능 영향 없음
 - 승인받지 않은 공통 코드 변경 없음
