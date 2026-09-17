@@ -7,7 +7,7 @@ export const game3Meta: GameMeta = {
   title: "CHEE-SE!",
   short: "제한 시간 안에 캐릭터와 함께 치-즈!",
   description: "제한 시간 안에 얼굴을 FACE ZONE 안으로 옮겨 캐릭터와 함께 사진을 촬영하는 게임입니다. 빠르게 위치를 맞추고 다양한 포즈를 완성해 가장 멋진 베스트 샷을 남겨보세요!",
-  tag: "SPEED",
+  tag: "SNAP IT WITH US!",
   icon: FaceSlightlySmilingPlus,
   accent: "#73d8ff",
   checks: [
