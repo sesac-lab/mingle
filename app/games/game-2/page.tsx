@@ -83,7 +83,7 @@ function formatDuration(milliseconds: number) {
 
 export default function Game2Page() {
   const router = useRouter();
-  const { playerName } = usePlayer();
+  const { playerName, characterSounds } = usePlayer();
   const [stage, setStage] = useState<Stage>("ready");
   const [countdown, setCountdown] = useState<3 | 2 | 1 | "START">(3);
   const [deck, setDeck] = useState<QuizQuestion[]>([]);
@@ -112,6 +112,8 @@ export default function Game2Page() {
   const feedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fpsSamplesRef = useRef<number[]>([]);
   const longTaskStatsRef = useRef({ count: 0, blockingMs: 0 });
+  const bgmRef = useRef<HTMLAudioElement | null>(null);
+  const effectAudiosRef = useRef<Set<HTMLAudioElement>>(new Set());
   const longTaskSupportedRef = useRef(
     typeof PerformanceObserver !== "undefined" && (PerformanceObserver.supportedEntryTypes?.includes("longtask") ?? false)
   );
@@ -130,10 +132,52 @@ export default function Game2Page() {
     stageRef.current = stage;
   }, [stage]);
 
+  const stopBgm = useCallback(() => {
+    if (!bgmRef.current) return;
+    bgmRef.current.pause();
+    bgmRef.current.currentTime = 0;
+    bgmRef.current = null;
+  }, []);
+
+  const stopAllAudio = useCallback(() => {
+    stopBgm();
+    effectAudiosRef.current.forEach((audio) => audio.pause());
+    effectAudiosRef.current.clear();
+  }, [stopBgm]);
+
+  const playAudio = useCallback((name: "bgm" | "success" | "fail" | "end") => {
+    const defaultSources = {
+      bgm: "/sound/default-bgm.mp3",
+      success: "/sound/default-success.mp3",
+      fail: "/sound/default-fail.mp3",
+      end: "/sound/default-end.mp3",
+    };
+    const source = characterSounds[name] ?? defaultSources[name];
+    if (name === "bgm" || name === "end") stopBgm();
+    const audio = new Audio(source);
+    audio.volume = name === "bgm" ? 0.66 : 1;
+    audio.loop = name === "bgm";
+    const release = () => effectAudiosRef.current.delete(audio);
+    audio.addEventListener("error", () => {
+      console.warn(`[game-2] ${name} 음원을 재생하지 못했습니다.`);
+      release();
+    }, { once: true });
+    if (name === "bgm") {
+      bgmRef.current = audio;
+    } else {
+      effectAudiosRef.current.add(audio);
+      audio.addEventListener("ended", release, { once: true });
+    }
+    void audio.play().catch((audioError: unknown) => {
+      console.warn(`[game-2] ${name} 음원 재생 실패`, audioError);
+    });
+  }, [characterSounds, stopBgm]);
+
   useEffect(() => () => {
     if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
+    stopAllAudio();
     stop();
-  }, [stop]);
+  }, [stop, stopAllAudio]);
 
   useEffect(() => {
     if (stage === "playing" && fps) fpsSamplesRef.current.push(fps);
@@ -175,8 +219,9 @@ export default function Game2Page() {
     setShowResourceDetail(false);
     fpsSamplesRef.current = [];
     longTaskStatsRef.current = { count: 0, blockingMs: 0 };
+    stopAllAudio();
     faceMask.resetMetrics();
-  }, [faceMask]);
+  }, [faceMask, stopAllAudio]);
 
   const finishGame = useCallback(() => {
     if (stageRef.current === "result") return;
@@ -193,8 +238,9 @@ export default function Game2Page() {
     setRemainingMs(0);
     setLocked(true);
     setStage("result");
+    playAudio("end");
     stop();
-  }, [stop]);
+  }, [playAudio, stop]);
 
   useEffect(() => {
     if (stage !== "countdown") return;
@@ -206,10 +252,11 @@ export default function Game2Page() {
         deadlineRef.current = performance.now() + GAME_DURATION_MS;
         questionStartedAtRef.current = performance.now();
         setStage("playing");
+        playAudio("bgm");
       }, 3_450),
     ];
     return () => timers.forEach(clearTimeout);
-  }, [stage]);
+  }, [playAudio, stage]);
 
   useEffect(() => {
     if (stage !== "playing") return;
@@ -267,6 +314,7 @@ export default function Game2Page() {
     setAnswer("");
     const now = performance.now();
     const isCorrect = submittedAnswer === currentQuestion.answer;
+    playAudio(isCorrect ? "success" : "fail");
     const nextCombo = isCorrect ? combo + 1 : 0;
     const scoreDelta = isCorrect ? 100 + Math.min(nextCombo * 10, 50) : 0;
     const nextScore = score + scoreDelta;
