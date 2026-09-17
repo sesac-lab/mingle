@@ -12,6 +12,7 @@ export type Game3RoundResult = {
   avgFps: number;
   errorCount: number;
   capturedImage?: string;
+  sharpnessScore?: number;
   excludedReasons?: string[];
 };
 

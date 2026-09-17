@@ -223,7 +223,7 @@ export default function Game3Page() {
     }
   }, [addEvent, stop, stopBgm]);
 
-  const timeLimitFor = (successCount: number) => (successCount >= 4 ? 1000 : successCount >= 2 ? 2000 : 3000);
+  const timeLimitFor = (successCount: number) => (successCount >= 4 ? 1000 : successCount >= 3 ? 2000 : 3000);
 
   const capture = useCallback((face: Rect, characterPlacement: Placement) => {
     const video = videoRef.current;
@@ -268,7 +268,7 @@ export default function Game3Page() {
     if (overlapRatio(face, characterPlacement) >= 0.8) excludedReasons.push("캐릭터 얼굴 가림");
     if (sharpness < 100) excludedReasons.push("초점 불량");
     if (closedEyes) excludedReasons.push("눈 감음");
-    return { image: canvas.toDataURL("image/jpeg", 0.82), excludedReasons, qualityError };
+    return { image: canvas.toDataURL("image/jpeg", 0.82), sharpnessScore: sharpness, excludedReasons, qualityError };
   }, [videoRef]);
 
   const finishGame = useCallback((resultOverride?: Game3RoundResult[]) => {
@@ -343,11 +343,13 @@ export default function Game3Page() {
     const avgInferenceMs = detectionCallsRef.current ? inferenceTotalRef.current / detectionCallsRef.current : 0;
     const avgFps = roundFrameElapsedRef.current > 0 ? (roundFrameCountRef.current * 1000) / roundFrameElapsedRef.current : 0;
     let capturedImage: string | undefined;
+    let sharpnessScore: number | undefined;
     let excludedReasons: string[] | undefined;
     if (result === "success" && detectedFace) {
       try {
         const captured = capture(detectedFace, placement);
         capturedImage = captured?.image;
+        sharpnessScore = captured?.sharpnessScore;
         excludedReasons = captured?.excludedReasons;
         if (captured?.qualityError) addEvent("MODEL_ERROR", captured.qualityError, current.round);
         if (!captured) addEvent("CAPTURE_ERROR", "사진을 캡처하지 못했습니다.", current.round);
@@ -369,6 +371,7 @@ export default function Game3Page() {
       avgFps,
       errorCount: roundErrorCountRef.current,
       capturedImage,
+      sharpnessScore,
       excludedReasons,
     };
     const results = [...current.results, roundResult];

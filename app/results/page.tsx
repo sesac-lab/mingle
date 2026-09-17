@@ -39,7 +39,7 @@ export default function ResultsPage() {
     const errorCount = result.events.filter((event) => event.type.endsWith("_ERROR")).length;
     const excluded = successfulRounds.filter((item) => item.capturedImage && item.excludedReasons?.length);
     const candidates = successfulRounds.filter((item) => item.capturedImage && !item.excludedReasons?.length);
-    const best = [...candidates].sort((a, b) => a.responseTimeMs - b.responseTimeMs)[0];
+    const best = [...candidates].sort((a, b) => (b.sharpnessScore ?? 0) - (a.sharpnessScore ?? 0))[0];
     return { successes, averageResponse, averageInference, maxInference, averageFps, droppedInference, errorCount, excluded, candidates, best, successRate: result.successRate };
   }, [result]);
 
@@ -64,7 +64,7 @@ export default function ResultsPage() {
             <span className="result-label">CHEE-SE! COMPLETE</span>
             <div className="result-player"><img src={result.characterImage} alt="" /><span>{result.playerName}</span></div>
             <h2>{result.score}<small>P</small></h2>
-            <p>{summary.successes}번의 순간을 포착했어요. 가장 빠르고 선명한 사진을 골랐습니다.</p>
+            <p>{summary.successes}번의 순간을 포착했어요. 가장 흔들림 없고 선명한 사진을 골랐습니다.</p>
             <div className="result-actions"><Button variant="outline" size="lg" onClick={() => router.push("/games")}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={() => router.push("/games/game-3")}><RotateCcw /> 다시 하기</Button></div>
           </div>
           <div className="best-shot-card">
