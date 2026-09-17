@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { calculateCharacterTransform, eatApple, GAME_LIMIT_MS, getMouthData, loadBestClearTime, lockScaleAfterSamples, moveApples, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
+import { calculateCharacterTransform, eatApple, GAME_LIMIT_MS, getMouthData, loadBestClearTime, lockScaleAfterSamples, mapSourcePoint, moveApples, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
 
 describe('사과 게임 로직', () => {
   it('사과 10개를 화면 경계 안에 생성한다', () => {
@@ -93,6 +93,24 @@ describe('사과 게임 로직', () => {
       expect((transform?.targetCenter.x ?? 0) + rotatedX * (transform?.scale ?? 0)).toBeCloseTo(targetPoints[index].x)
       expect((transform?.targetCenter.y ?? 0) + rotatedY * (transform?.scale ?? 0)).toBeCloseTo(targetPoints[index].y)
     })
+  })
+
+  it('보정 기준점이 화면에 실제로 그려지는 위치를 계산한다 (배율만 있는 경우)', () => {
+    const calibration = { leftEye: { x: 300, y: 300 }, rightEye: { x: 700, y: 300 }, forehead: { x: 500, y: 100 }, mouth: { x: 500, y: 450 }, chin: { x: 500, y: 700 } }
+    const face = { leftEye: { x: 600, y: 600 }, rightEye: { x: 1400, y: 600 }, forehead: { x: 1000, y: 200 }, mouthCenter: { x: 1000, y: 900 }, chin: { x: 1000, y: 1400 } }
+    const transform = calculateCharacterTransform(calibration, face)
+    const mapped = mapSourcePoint(transform!, calibration.mouth)
+    expect(mapped.x).toBeCloseTo(face.mouthCenter.x)
+    expect(mapped.y).toBeCloseTo(face.mouthCenter.y)
+  })
+
+  it('scale 인자를 넘기면 고정된(locked) 배율 기준으로 위치를 다시 계산한다', () => {
+    const calibration = { leftEye: { x: 300, y: 300 }, rightEye: { x: 700, y: 300 }, forehead: { x: 500, y: 100 }, mouth: { x: 500, y: 450 }, chin: { x: 500, y: 700 } }
+    const face = { leftEye: { x: 600, y: 600 }, rightEye: { x: 1400, y: 600 }, forehead: { x: 1000, y: 200 }, mouthCenter: { x: 1000, y: 900 }, chin: { x: 1000, y: 1400 } }
+    const transform = calculateCharacterTransform(calibration, face)
+    const mappedWithLockedScale = mapSourcePoint(transform!, calibration.mouth, 1)
+    expect(mappedWithLockedScale.x).toBeCloseTo((transform!.targetCenter.x + (calibration.mouth.x - transform!.sourceCenter.x)))
+    expect(mappedWithLockedScale.y).toBeCloseTo((transform!.targetCenter.y + (calibration.mouth.y - transform!.sourceCenter.y)))
   })
 
   it('첫 인식 배율은 이후 얼굴 크기가 달라져도 유지한다', () => {

@@ -8,7 +8,7 @@ import { AppShell } from '@/components/common/app-shell'
 import { usePlayer } from '@/lib/player-context'
 import { useWebcam } from '@/lib/webcam'
 import { game1Meta } from './meta'
-import { APPLE_COUNT, calculateCharacterTransform, CalibrationPoints, eatApple, formatSeconds, GAME_LIMIT_MS, GameResult, getMouthData, loadBestClearTime, lockScaleAfterSamples, moveApples, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
+import { APPLE_COUNT, calculateCharacterTransform, CalibrationPoints, eatApple, formatSeconds, GAME_LIMIT_MS, GameResult, getMouthData, loadBestClearTime, lockScaleAfterSamples, mapSourcePoint, moveApples, Point, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
 import styles from './game-1.module.css'
 
 type Stage = 'ready' | 'calibrating' | 'playing' | 'result'
@@ -56,23 +56,25 @@ function createCharacterCanvas(image: HTMLImageElement) {
   return canvas
 }
 
-function drawCharacter(context: CanvasRenderingContext2D, image: HTMLCanvasElement, calibration: CalibrationPoints, face: FaceData, lockedScale: number | null) {
+function drawCharacter(context: CanvasRenderingContext2D, image: HTMLCanvasElement, calibration: CalibrationPoints, face: FaceData, lockedScale: number | null, mouthRadius: number) {
   const transform = calculateCharacterTransform(calibration, face)
   if (!transform) return null
+  const scale = lockedScale ?? transform.scale
   context.save()
   context.translate(transform.targetCenter.x, transform.targetCenter.y)
   context.rotate(transform.rotation)
-  context.scale(lockedScale ?? transform.scale, lockedScale ?? transform.scale)
+  context.scale(scale, scale)
   context.translate(-transform.sourceCenter.x, -transform.sourceCenter.y)
   context.drawImage(image, 0, 0)
   context.restore()
+  const mouthCenter = mapSourcePoint(transform, calibration.mouth, scale)
   if (face.mouthOpen) {
     context.fillStyle = 'rgba(47, 22, 44, 0.85)'
     context.beginPath()
-    context.arc(face.mouthCenter.x, face.mouthCenter.y, face.mouthRadius.y, 0, Math.PI * 2)
+    context.arc(mouthCenter.x, mouthCenter.y, mouthRadius, 0, Math.PI * 2)
     context.fill()
   }
-  return transform.scale
+  return { suggestedScale: transform.scale, mouthCenter }
 }
 
 function playEffect(src: string, volume = 0.6) {
@@ -98,6 +100,8 @@ export default function Game1Page() {
   const endedRef = useRef(false)
   const lockedCharacterScaleRef = useRef<number | null>(null)
   const initialScaleSamplesRef = useRef<number[]>([])
+  const lockedMouthRadiusRef = useRef<number | null>(null)
+  const initialMouthRadiusSamplesRef = useRef<number[]>([])
   const [stage, setStage] = useState<Stage>('ready')
   const [modelStatus, setModelStatus] = useState<ModelStatus>('idle')
   const [modelError, setModelError] = useState('')
@@ -182,6 +186,8 @@ export default function Game1Page() {
     endedRef.current = false
     lockedCharacterScaleRef.current = null
     initialScaleSamplesRef.current = []
+    lockedMouthRadiusRef.current = null
+    initialMouthRadiusSamplesRef.current = []
     setResult(null)
     setHud({ applesEaten: 0, remainingMs: GAME_LIMIT_MS, mouthOpen: false, faceFound: false })
     if (!bgmRef.current) {
@@ -217,18 +223,28 @@ export default function Game1Page() {
       }
       const faceData = faceDataRef.current
       const character = characterImageRef.current
+      if (faceData && lockedMouthRadiusRef.current === null) {
+        const lock = lockScaleAfterSamples(initialMouthRadiusSamplesRef.current, faceData.mouthRadius.y)
+        initialMouthRadiusSamplesRef.current = lock.samples
+        lockedMouthRadiusRef.current = resolveLockedScale(lockedMouthRadiusRef.current, lock.lockedScale)
+      }
+      const mouthRadiusValue = lockedMouthRadiusRef.current ?? faceData?.mouthRadius.y ?? 0
+      let hitTestMouthCenter: Point | null = faceData?.mouthCenter ?? null
       if (faceData && character && calibrationComplete) {
-        const suggestedScale = drawCharacter(context, character, calibration as CalibrationPoints, faceData, lockedCharacterScaleRef.current)
-        if (lockedCharacterScaleRef.current === null) {
-          const lock = lockScaleAfterSamples(initialScaleSamplesRef.current, suggestedScale)
-          initialScaleSamplesRef.current = lock.samples
-          lockedCharacterScaleRef.current = resolveLockedScale(lockedCharacterScaleRef.current, lock.lockedScale)
+        const drawResult = drawCharacter(context, character, calibration as CalibrationPoints, faceData, lockedCharacterScaleRef.current, mouthRadiusValue)
+        if (drawResult) {
+          hitTestMouthCenter = drawResult.mouthCenter
+          if (lockedCharacterScaleRef.current === null) {
+            const lock = lockScaleAfterSamples(initialScaleSamplesRef.current, drawResult.suggestedScale)
+            initialScaleSamplesRef.current = lock.samples
+            lockedCharacterScaleRef.current = resolveLockedScale(lockedCharacterScaleRef.current, lock.lockedScale)
+          }
         }
       }
       const deltaSeconds = lastFrameRef.current ? Math.min((timestamp - lastFrameRef.current) / 1000, 0.1) : 0
       lastFrameRef.current = timestamp
       applesRef.current = moveApples(applesRef.current, width, height, deltaSeconds)
-      const eaten = eatApple(applesRef.current, faceData?.mouthCenter ?? null, faceData?.mouthRadius ?? null, faceData?.mouthOpen ?? false)
+      const eaten = eatApple(applesRef.current, hitTestMouthCenter, { x: mouthRadiusValue, y: mouthRadiusValue }, faceData?.mouthOpen ?? false)
       applesRef.current = eaten.apples
       applesRef.current.forEach((apple) => drawApple(context, apple.x, apple.y, apple.radius))
       const elapsedMs = timestamp - startedAtRef.current

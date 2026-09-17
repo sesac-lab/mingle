@@ -284,6 +284,17 @@ export function calculateCharacterTransform(
   }
 }
 
+export function mapSourcePoint(transform: CharacterTransform, point: Point, scale = transform.scale): Point {
+  const dx = point.x - transform.sourceCenter.x
+  const dy = point.y - transform.sourceCenter.y
+  const cos = Math.cos(transform.rotation)
+  const sin = Math.sin(transform.rotation)
+  return {
+    x: transform.targetCenter.x + (dx * cos - dy * sin) * scale,
+    y: transform.targetCenter.y + (dx * sin + dy * cos) * scale,
+  }
+}
+
 export function resolveLockedScale(lockedScale: number | null, suggestedScale: number | null) {
   return lockedScale ?? suggestedScale
 }
