@@ -22,11 +22,16 @@ export function useFaceMask(enabled: boolean) {
   const [position, setPosition] = useState<FaceMaskPosition | null>(null);
   const [state, setState] = useState<FaceMaskState>("loading");
   const [inferenceMs, setInferenceMs] = useState(0);
+  const [detectionCount, setDetectionCount] = useState(0);
+  const [totalInferenceMs, setTotalInferenceMs] = useState(0);
+  const [maxInferenceMs, setMaxInferenceMs] = useState(0);
+  const [modelLoadMs, setModelLoadMs] = useState<number | null>(null);
 
   useEffect(() => {
     if (!enabled || detectorRef.current) return;
 
     let cancelled = false;
+    const loadStartedAt = performance.now();
 
     const loadDetector = async () => {
       try {
@@ -45,6 +50,7 @@ export function useFaceMask(enabled: boolean) {
         }
 
         detectorRef.current = detector;
+        setModelLoadMs(performance.now() - loadStartedAt);
         setState("searching");
       } catch (error) {
         console.error("Face detector initialization failed", error);
@@ -73,7 +79,11 @@ export function useFaceMask(enabled: boolean) {
 
     const startedAt = performance.now();
     const detection = detector.detectForVideo(video, timestamp).detections[0];
-    setInferenceMs(performance.now() - startedAt);
+    const elapsed = performance.now() - startedAt;
+    setInferenceMs(elapsed);
+    setDetectionCount((count) => count + 1);
+    setTotalInferenceMs((total) => total + elapsed);
+    setMaxInferenceMs((maximum) => Math.max(maximum, elapsed));
 
     const boundingBox = detection?.boundingBox;
     if (!boundingBox || !video.videoWidth || !video.videoHeight) {
@@ -140,10 +150,22 @@ export function useFaceMask(enabled: boolean) {
     setState("tracking");
   }, []);
 
+  const resetMetrics = useCallback(() => {
+    setInferenceMs(0);
+    setDetectionCount(0);
+    setTotalInferenceMs(0);
+    setMaxInferenceMs(0);
+  }, []);
+
   return {
     position: enabled ? position : null,
     state: enabled ? state : "loading",
     inferenceMs: enabled ? inferenceMs : 0,
+    detectionCount,
+    averageInferenceMs: detectionCount ? totalInferenceMs / detectionCount : 0,
+    maxInferenceMs,
+    modelLoadMs,
+    resetMetrics,
     onFrame,
   };
 }
