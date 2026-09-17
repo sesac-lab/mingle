@@ -7,7 +7,7 @@ import { ArrowLeft, Check, Clock3, CircleGauge, Cpu, Flag, ImageIcon, Play, Rota
 import { Button } from "@/components/ui/button";
 import { AppShell } from "@/components/common/app-shell";
 import { usePlayer } from "@/lib/player-context";
-import { GAME_RESULT_STORAGE_KEY, type Game3Result, type Game3RoundResult, type GameEvent } from "@/lib/games/game-result";
+import { GAME_RESULT_STORAGE_KEY, type Game3Result, type Game3RoundResult, type GameEvent, type GameEventType } from "@/lib/games/game-result";
 import { useWebcam, useFrameLoop } from "@/lib/webcam";
 import { game3Meta } from "./meta";
 
@@ -128,8 +128,18 @@ export default function Game3Page() {
   const roundStartedAtRef = useRef(0);
   const detectionCallsRef = useRef(0);
   const inferenceTotalRef = useRef(0);
-  const faceLoggedRoundRef = useRef(0);
+  const inferenceMaxRef = useRef(0);
+  const droppedInferenceCountRef = useRef(0);
+  const roundFrameCountRef = useRef(0);
+  const roundFrameElapsedRef = useRef(0);
+  const roundErrorCountRef = useRef(0);
+  const modelErrorLoggedRoundRef = useRef(0);
+  const cameraRequestedAtRef = useRef(0);
+  const cameraReadyMsRef = useRef(0);
+  const modelLoadingAtRef = useRef(0);
+  const modelReadyMsRef = useRef(0);
   const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const roundTimerRef = useRef<number | null>(null);
   const characterRef = useRef<HTMLImageElement | null>(null);
   const stageRef = useRef<Stage>(stage);
   const eventsRef = useRef<GameEvent[]>([]);
@@ -141,9 +151,19 @@ export default function Game3Page() {
 
   useEffect(() => { stageRef.current = stage; }, [stage]);
 
-  const addEvent = useCallback((type: string, message?: string, eventRound?: number) => {
-    const event = { timestamp: Date.now(), type, round: eventRound, message };
+  const addEvent = useCallback((type: GameEventType, message?: string, eventRound?: number, durationMs?: number) => {
+    const event: GameEvent = { timestamp: Date.now(), type, round: eventRound, durationMs, message };
     eventsRef.current = [...eventsRef.current, event];
+    if (type.endsWith("_ERROR") && eventRound !== undefined) {
+      const resultIndex = gameRef.current.results.findIndex((item) => item.round === eventRound);
+      if (resultIndex >= 0) {
+        const results = gameRef.current.results.map((item, index) => index === resultIndex ? { ...item, errorCount: item.errorCount + 1 } : item);
+        gameRef.current = { ...gameRef.current, results };
+        setRoundResults(results);
+      } else if (eventRound === gameRef.current.round) {
+        roundErrorCountRef.current += 1;
+      }
+    }
     return event;
   }, []);
 
@@ -162,25 +182,46 @@ export default function Game3Page() {
       end: "/sound/default-end.mp3",
     };
     const source = characterSounds[name] ?? defaultSources[name];
+    const audioRound = gameRef.current.round;
     if (name === "bgm" || name === "end") stopBgm();
     const audio = new Audio(source);
+    let audioErrorReported = false;
     audio.volume = name === "bgm" ? 0.66 : 1;
     audio.loop = name === "bgm";
     const release = () => effectAudiosRef.current.delete(audio);
-    audio.addEventListener("error", () => {
+    const reportAudioError = (message: string) => {
+      if (audioErrorReported) return;
+      audioErrorReported = true;
       release();
-      addEvent("AUDIO_ERROR", `${name} 음원을 재생하지 못했습니다.`, gameRef.current.round);
-    }, { once: true });
+      addEvent("AUDIO_ERROR", message, audioRound);
+    };
+    audio.addEventListener("error", () => reportAudioError(`${name} 음원을 재생하지 못했습니다.`), { once: true });
     if (name === "bgm") bgmRef.current = audio;
     else {
       effectAudiosRef.current.add(audio);
       audio.addEventListener("ended", release, { once: true });
     }
-    void audio.play().then(() => addEvent("AUDIO_STARTED", name, gameRef.current.round)).catch((audioError: unknown) => {
-      release();
-      addEvent("AUDIO_ERROR", audioError instanceof Error ? audioError.message : name, gameRef.current.round);
+    void audio.play().catch((audioError: unknown) => {
+      reportAudioError(audioError instanceof Error ? audioError.message : name);
     });
   }, [addEvent, characterSounds, stopBgm]);
+
+  const cleanupActiveResources = useCallback(() => {
+    try {
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = null;
+      if (roundTimerRef.current) clearInterval(roundTimerRef.current);
+      roundTimerRef.current = null;
+      stopBgm();
+      effectAudiosRef.current.forEach((audio) => audio.pause());
+      effectAudiosRef.current.clear();
+      inferenceBusyRef.current = false;
+      stop();
+      addEvent("RESOURCE_CLEANUP", "MediaStream, timer, animation frame, audio 정리 완료");
+    } catch (cleanupError) {
+      addEvent("RESOURCE_CLEANUP_ERROR", cleanupError instanceof Error ? cleanupError.message : "자원 정리 오류");
+    }
+  }, [addEvent, stop, stopBgm]);
 
   const timeLimitFor = (successCount: number) => (successCount >= 4 ? 1000 : successCount >= 2 ? 2000 : 3000);
 
@@ -231,27 +272,37 @@ export default function Game3Page() {
   }, [videoRef]);
 
   const finishGame = useCallback((resultOverride?: Game3RoundResult[]) => {
-    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
     roundLockedRef.current = true;
     const results = resultOverride ?? gameRef.current.results;
-    const resultEvents = [...eventsRef.current, { timestamp: Date.now(), type: "GAME_ENDED", round: gameRef.current.round }];
-    const result: Game3Result = { game: "game-3", playerName, characterImage, score: gameRef.current.score, startedAt: gameRef.current.startedAt || Date.now(), endedAt: Date.now(), rounds: results, events: resultEvents };
+    addEvent("GAME_ENDED", undefined, gameRef.current.round);
+    cleanupActiveResources();
+    playAudio("end");
+    const result: Game3Result = {
+      game: "game-3",
+      playerName,
+      characterImage,
+      score: gameRef.current.score,
+      startedAt: gameRef.current.startedAt || Date.now(),
+      endedAt: Date.now(),
+      successRate: results.length ? (results.filter((item) => item.result === "success").length / results.length) * 100 : 0,
+      cameraReadyMs: cameraReadyMsRef.current,
+      modelReadyMs: modelReadyMsRef.current,
+      rounds: results,
+      events: [...eventsRef.current],
+    };
     try {
       sessionStorage.setItem(GAME_RESULT_STORAGE_KEY, JSON.stringify(result));
     } catch {
       addEvent("CAPTURE_ERROR", "결과 저장 공간이 부족해 사진 일부를 저장하지 못했습니다.");
-      const compactResult = { ...result, rounds: results.map((item) => ({ ...item, capturedImage: undefined })) };
+      const compactResult = { ...result, rounds: results.map((item) => ({ ...item, capturedImage: undefined })), events: [...eventsRef.current] };
       try {
         sessionStorage.setItem(GAME_RESULT_STORAGE_KEY, JSON.stringify(compactResult));
       } catch {
         // Storage may be unavailable in privacy-restricted browsers. The completion screen still works.
       }
     }
-    eventsRef.current = resultEvents;
-    stop();
-    playAudio("end");
     setStage("finished");
-  }, [addEvent, characterImage, playAudio, playerName, stop]);
+  }, [addEvent, characterImage, cleanupActiveResources, playAudio, playerName]);
 
   const beginRound = useCallback((nextRound: number) => {
     const layout = createRoundLayout();
@@ -260,6 +311,12 @@ export default function Game3Page() {
     gameRef.current.round = nextRound;
     detectionCallsRef.current = 0;
     inferenceTotalRef.current = 0;
+    inferenceMaxRef.current = 0;
+    droppedInferenceCountRef.current = 0;
+    roundFrameCountRef.current = 0;
+    roundFrameElapsedRef.current = 0;
+    roundErrorCountRef.current = 0;
+    modelErrorLoggedRoundRef.current = 0;
     roundStartedAtRef.current = performance.now();
     roundLockedRef.current = false;
     setRound(nextRound);
@@ -283,7 +340,8 @@ export default function Game3Page() {
     const totalScore = current.score + scoreDelta;
     const nextSuccesses = current.successes + (result === "success" ? 1 : 0);
     const nextFailures = current.failures + (result === "fail" ? 1 : 0);
-    const inferenceLatencyMs = detectionCallsRef.current ? inferenceTotalRef.current / detectionCallsRef.current : undefined;
+    const avgInferenceMs = detectionCallsRef.current ? inferenceTotalRef.current / detectionCallsRef.current : 0;
+    const avgFps = roundFrameElapsedRef.current > 0 ? (roundFrameCountRef.current * 1000) / roundFrameElapsedRef.current : 0;
     let capturedImage: string | undefined;
     let excludedReasons: string[] | undefined;
     if (result === "success" && detectedFace) {
@@ -292,32 +350,56 @@ export default function Game3Page() {
         capturedImage = captured?.image;
         excludedReasons = captured?.excludedReasons;
         if (captured?.qualityError) addEvent("MODEL_ERROR", captured.qualityError, current.round);
-        addEvent(captured ? "CAPTURE_SUCCESS" : "CAPTURE_ERROR", undefined, current.round);
+        if (!captured) addEvent("CAPTURE_ERROR", "사진을 캡처하지 못했습니다.", current.round);
       } catch (captureError) {
         addEvent("CAPTURE_ERROR", captureError instanceof Error ? captureError.message : undefined, current.round);
       }
     }
-    const roundResult: Game3RoundResult = { round: current.round, result, scoreDelta, totalScore, responseTimeMs: result === "success" ? responseTimeMs : limit, timeLimitMs: limit, detectionCalls: detectionCallsRef.current, inferenceLatencyMs, capturedImage, excludedReasons };
+    const roundResult: Game3RoundResult = {
+      round: current.round,
+      result,
+      scoreDelta,
+      totalScore,
+      responseTimeMs: result === "success" ? responseTimeMs : limit,
+      timeLimitMs: limit,
+      detectionCalls: detectionCallsRef.current,
+      avgInferenceMs,
+      maxInferenceMs: inferenceMaxRef.current,
+      droppedInferenceCount: droppedInferenceCountRef.current,
+      avgFps,
+      errorCount: roundErrorCountRef.current,
+      capturedImage,
+      excludedReasons,
+    };
     const results = [...current.results, roundResult];
     gameRef.current = { ...current, score: totalScore, successes: nextSuccesses, failures: nextFailures, results };
     setScore(totalScore);
     setSuccesses(nextSuccesses);
     setFailures(nextFailures);
     setRoundResults(results);
-    setAverageInference(inferenceLatencyMs ?? 0);
+    setAverageInference(avgInferenceMs);
     setLastResult(result);
     setStage("roundTransition");
-    addEvent(result === "success" ? "ZONE_SUCCESS" : "ZONE_TIMEOUT", undefined, current.round);
+    addEvent(result === "success" ? "ROUND_SUCCESS" : "ROUND_TIMEOUT", undefined, current.round, roundResult.responseTimeMs);
     addEvent("ROUND_ENDED", undefined, current.round);
     playAudio(result);
     transitionTimerRef.current = setTimeout(() => {
-      if (current.round >= MAX_ROUNDS || nextFailures >= MAX_FAILURES) finishGame(results);
+      if (current.round >= MAX_ROUNDS || nextFailures >= MAX_FAILURES) finishGame(gameRef.current.results);
       else beginRound(current.round + 1);
     }, 500);
   }, [addEvent, beginRound, capture, finishGame, placement, playAudio]);
 
-  const handleFrame = useCallback(async (video: HTMLVideoElement, timestamp: number) => {
-    if (stageRef.current !== "playing" || roundLockedRef.current || inferenceBusyRef.current || !detectorRef.current) return;
+  const handleFrame = useCallback(async (video: HTMLVideoElement, timestamp: number, delta: number) => {
+    if (stageRef.current !== "playing" || roundLockedRef.current) return;
+    if (delta > 0) {
+      roundFrameCountRef.current += 1;
+      roundFrameElapsedRef.current += delta;
+    }
+    if (!detectorRef.current) return;
+    if (inferenceBusyRef.current) {
+      droppedInferenceCountRef.current += 1;
+      return;
+    }
     if (timestamp - lastInferenceRef.current < INFERENCE_INTERVAL_MS) return;
     lastInferenceRef.current = timestamp;
     inferenceBusyRef.current = true;
@@ -327,6 +409,7 @@ export default function Game3Page() {
       const latency = performance.now() - inferenceStart;
       detectionCallsRef.current += 1;
       inferenceTotalRef.current += latency;
+      inferenceMaxRef.current = Math.max(inferenceMaxRef.current, latency);
       setAverageInference(inferenceTotalRef.current / detectionCallsRef.current);
       const detection: Detection | undefined = result.detections[0];
       if (!detection?.boundingBox || !video.videoWidth || !video.videoHeight) {
@@ -336,25 +419,24 @@ export default function Game3Page() {
       const box = detection.boundingBox;
       const normalized: Rect = { left: 1 - (box.originX + box.width) / video.videoWidth, top: box.originY / video.videoHeight, width: box.width / video.videoWidth, height: box.height / video.videoHeight };
       setFaceBox(normalized);
-      if (faceLoggedRoundRef.current !== gameRef.current.round) {
-        faceLoggedRoundRef.current = gameRef.current.round;
-        addEvent("FACE_DETECTED", undefined, gameRef.current.round);
-      }
       if (contains(zone, normalized)) finishRound("success", normalized);
     } catch (inferenceError) {
-      addEvent("MODEL_ERROR", inferenceError instanceof Error ? inferenceError.message : "얼굴 감지 오류", gameRef.current.round);
+      if (modelErrorLoggedRoundRef.current !== gameRef.current.round) {
+        modelErrorLoggedRoundRef.current = gameRef.current.round;
+        addEvent("MODEL_ERROR", inferenceError instanceof Error ? inferenceError.message : "얼굴 감지 오류", gameRef.current.round);
+      }
     } finally {
       inferenceBusyRef.current = false;
     }
   }, [addEvent, finishRound, zone]);
 
-  const { fps } = useFrameLoop(videoRef, { enabled: status === "active" && (stage === "preview" || stage === "ready" || stage === "playing"), onFrame: (video, info) => void handleFrame(video, info.timestamp) });
+  const { fps } = useFrameLoop(videoRef, { enabled: status === "active" && (stage === "preview" || stage === "ready" || stage === "playing"), onFrame: (video, info) => void handleFrame(video, info.timestamp, info.delta) });
 
   useEffect(() => {
     if (status !== "active" || detectorRef.current) return;
     let cancelled = false;
     setModelStatus("loading");
-    addEvent("MODEL_LOADING");
+    modelLoadingAtRef.current = performance.now();
     FilesetResolver.forVisionTasks("/mediapipe")
       .then((vision) => Promise.all([
         FaceDetector.createFromOptions(vision, { baseOptions: { modelAssetPath: "/mediapipe/blaze_face_short_range.tflite" }, runningMode: "VIDEO", minDetectionConfidence: 0.55 }),
@@ -364,9 +446,10 @@ export default function Game3Page() {
         if (cancelled) { detector.close(); landmarker.close(); return; }
         detectorRef.current = detector;
         landmarkerRef.current = landmarker;
+        modelReadyMsRef.current = Math.round(performance.now() - modelLoadingAtRef.current);
         setModelStatus("ready");
         setStage("ready");
-        addEvent("MODEL_READY");
+        addEvent("MODEL_READY", undefined, undefined, modelReadyMsRef.current);
       })
       .catch((modelLoadError: unknown) => {
         if (cancelled) return;
@@ -380,35 +463,57 @@ export default function Game3Page() {
 
   useEffect(() => {
     if (stage !== "playing") return;
-    const timer = window.setInterval(() => {
+    roundTimerRef.current = window.setInterval(() => {
       const limit = timeLimitFor(gameRef.current.successes);
       const remaining = Math.max(0, limit - (performance.now() - roundStartedAtRef.current));
       setRemainingMs(remaining);
       if (remaining <= 0) finishRound("fail");
     }, 40);
-    return () => window.clearInterval(timer);
+    return () => {
+      if (roundTimerRef.current) window.clearInterval(roundTimerRef.current);
+      roundTimerRef.current = null;
+    };
   }, [finishRound, stage]);
 
   useEffect(() => () => {
-    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
-    detectorRef.current?.close();
-    landmarkerRef.current?.close();
-    detectorRef.current = null;
-    landmarkerRef.current = null;
-    stopBgm();
-    effectAudiosRef.current.forEach((audio) => audio.pause());
-    effectAudiosRef.current.clear();
+    try {
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      if (roundTimerRef.current) clearInterval(roundTimerRef.current);
+      detectorRef.current?.close();
+      landmarkerRef.current?.close();
+      detectorRef.current = null;
+      landmarkerRef.current = null;
+      stopBgm();
+      effectAudiosRef.current.forEach((audio) => audio.pause());
+      effectAudiosRef.current.clear();
+      eventsRef.current = [...eventsRef.current, { timestamp: Date.now(), type: "RESOURCE_CLEANUP", message: "페이지 이동 자원 정리 완료" }];
+    } catch (cleanupError) {
+      eventsRef.current = [...eventsRef.current, { timestamp: Date.now(), type: "RESOURCE_CLEANUP_ERROR", message: cleanupError instanceof Error ? cleanupError.message : "페이지 이동 자원 정리 오류" }];
+    }
   }, [stopBgm]);
 
   useEffect(() => {
-    if (status === "active") addEvent("CAMERA_CONNECTED");
+    if (status === "active") {
+      cameraReadyMsRef.current = cameraRequestedAtRef.current ? Math.round(performance.now() - cameraRequestedAtRef.current) : 0;
+      addEvent("CAMERA_CONNECTED", undefined, undefined, cameraReadyMsRef.current);
+      if (detectorRef.current) {
+        modelReadyMsRef.current = 0;
+        addEvent("MODEL_READY", undefined, undefined, 0);
+      }
+    }
     if (status === "error") addEvent("CAMERA_ERROR", error ?? undefined);
   }, [addEvent, error, status]);
 
-  const requestCamera = () => { setStage("preview"); addEvent("CAMERA_REQUESTED"); start(); };
+  const requestCamera = () => {
+    eventsRef.current = [];
+    cameraRequestedAtRef.current = performance.now();
+    cameraReadyMsRef.current = 0;
+    modelReadyMsRef.current = 0;
+    setStage("preview");
+    start();
+  };
   const startGame = () => {
     gameRef.current = { round: 1, score: 0, successes: 0, failures: 0, startedAt: Date.now(), results: [] };
-    eventsRef.current = [];
     setScore(0); setSuccesses(0); setFailures(0); setRoundResults([]);
     addEvent("GAME_STARTED");
     playAudio("bgm");
