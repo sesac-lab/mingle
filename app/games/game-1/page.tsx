@@ -7,6 +7,9 @@ import { Button } from '@/components/ui/button'
 import { AppShell } from '@/components/common/app-shell'
 import { usePlayer } from '@/lib/player-context'
 import { useWebcam } from '@/lib/webcam'
+import { ResourceSummary, useResourceProfiler } from '@/lib/telemetry/use-resource-profiler'
+import { buildSecondTicks, SecondTick } from '@/lib/telemetry/second-ticks'
+import { ResourceChart } from './resource-chart'
 import { game1Meta } from './meta'
 import { APPLE_COUNT, calculateCharacterTransform, CalibrationPoints, eatApple, formatSeconds, GAME_LIMIT_MS, GameResult, getMouthData, loadBestClearTime, lockScaleAfterSamples, mapSourcePoint, moveApples, Point, removeCheckerboardBackground, resolveLockedScale, saveBestClearTime, spawnApples } from './game-engine'
 import styles from './game-1.module.css'
@@ -102,6 +105,7 @@ export default function Game1Page() {
   const router = useRouter()
   const { playerName, characterImage } = usePlayer()
   const { videoRef, status: cameraStatus, error: cameraError, start, stop } = useWebcam({ autoStart: false })
+  const profiler = useResourceProfiler()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const calibrationImageRef = useRef<HTMLImageElement | null>(null)
   const landmarkerRef = useRef<{ detectForVideo: (video: HTMLVideoElement, timestamp: number) => { faceLandmarks: Landmark[][] }; close: () => void } | null>(null)
@@ -126,6 +130,8 @@ export default function Game1Page() {
   const [bestClearMs, setBestClearMs] = useState<number | null>(null)
   const [isNewRecord, setIsNewRecord] = useState(false)
   const [hud, setHud] = useState({ applesEaten: 0, remainingMs: GAME_LIMIT_MS, mouthOpen: false, faceFound: false })
+  const [resourceSummary, setResourceSummary] = useState<ResourceSummary | null>(null)
+  const [secondTicks, setSecondTicks] = useState<SecondTick[]>([])
   const [calibrationImageSize, setCalibrationImageSize] = useState({ width: 0, height: 0 })
   const [calibrationCharacterImage, setCalibrationCharacterImage] = useState(characterImage)
   const calibrationComplete = calibrationSteps.every((step) => calibration[step.key])
@@ -164,7 +170,11 @@ export default function Game1Page() {
 
   useEffect(() => () => { landmarkerRef.current?.close(); bgmRef.current?.pause(); audioContextRef.current?.close().catch(() => {}) }, [])
 
+  useEffect(() => { profiler.recordStage('idle') }, [profiler])
+
   const prepareCamera = () => {
+    profiler.reset()
+    profiler.recordStage('init')
     if (cameraStatus === 'idle' || cameraStatus === 'error') start()
     if (!audioContextRef.current) audioContextRef.current = new AudioContext()
     if (modelStatus === 'error') {
@@ -177,6 +187,10 @@ export default function Game1Page() {
   const finishGame = useCallback((status: GameResult['status'], elapsedMs: number) => {
     if (endedRef.current) return
     endedRef.current = true
+    profiler.recordStage('finish')
+    const session = profiler.exportSession()
+    setResourceSummary(profiler.getSummary())
+    setSecondTicks(buildSecondTicks(session))
     const gameResult = { status, elapsedMs: Math.min(elapsedMs, GAME_LIMIT_MS), applesEaten: APPLE_COUNT - applesRef.current.length }
     setResult(gameResult)
     if (status === 'success') {
@@ -191,11 +205,12 @@ export default function Game1Page() {
     playEffect(status === 'success' ? '/sound/default-success.mp3' : status === 'timeout' ? '/sound/default-fail.mp3' : '/sound/default-end.mp3')
     stop()
     setStage('result')
-  }, [stop])
+  }, [profiler, stop])
 
   const beginPlaying = useCallback(() => {
     const video = videoRef.current
     if (!video) return
+    profiler.recordStage('playing')
     applesRef.current = spawnApples(video.videoWidth || 1280, video.videoHeight || 720)
     startedAtRef.current = performance.now()
     lastFrameRef.current = 0
@@ -215,7 +230,7 @@ export default function Game1Page() {
     bgmRef.current.currentTime = 0
     bgmRef.current.play().catch(() => {})
     setStage('playing')
-  }, [videoRef])
+  }, [profiler, videoRef])
 
   useEffect(() => {
     if (stage !== 'playing') return
@@ -225,6 +240,7 @@ export default function Game1Page() {
       const video = videoRef.current
       const context = canvas?.getContext('2d')
       if (!canvas || !video || !context || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) { animationFrame = requestAnimationFrame(render); return }
+      profiler.recordFrame(timestamp)
       const width = video.videoWidth || 1280
       const height = video.videoHeight || 720
       if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height }
@@ -235,7 +251,9 @@ export default function Game1Page() {
       context.restore()
       if (landmarkerRef.current && timestamp - lastInferenceRef.current >= 50) {
         lastInferenceRef.current = timestamp
+        const inferenceStartedAt = performance.now()
         const landmarks = landmarkerRef.current.detectForVideo(video, timestamp).faceLandmarks[0]
+        profiler.recordInference(timestamp, performance.now() - inferenceStartedAt)
         faceDataRef.current = landmarks ? getMouthData(landmarks, width, height) : null
       }
       const faceData = faceDataRef.current
@@ -263,7 +281,10 @@ export default function Game1Page() {
       applesRef.current = moveApples(applesRef.current, width, height, deltaSeconds)
       const eaten = eatApple(applesRef.current, hitTestMouthCenter, { x: mouthRadiusValue, y: mouthRadiusValue }, faceData?.mouthOpen ?? false)
       applesRef.current = eaten.apples
-      if (eaten.ateApple) playEatSound(audioContextRef.current)
+      if (eaten.ateApple) {
+        playEatSound(audioContextRef.current)
+        profiler.recordAppleEaten(APPLE_COUNT - applesRef.current.length)
+      }
       applesRef.current.forEach((apple) => drawApple(context, apple.x, apple.y, apple.radius))
       const elapsedMs = timestamp - startedAtRef.current
       setHud({ applesEaten: APPLE_COUNT - applesRef.current.length, remainingMs: Math.max(0, GAME_LIMIT_MS - elapsedMs), mouthOpen: faceData?.mouthOpen ?? false, faceFound: Boolean(faceData) })
@@ -273,7 +294,7 @@ export default function Game1Page() {
     }
     animationFrame = requestAnimationFrame(render)
     return () => cancelAnimationFrame(animationFrame)
-  }, [calibration, calibrationComplete, finishGame, stage, videoRef])
+  }, [calibration, calibrationComplete, finishGame, profiler, stage, videoRef])
 
   const addCalibrationPoint = (event: React.MouseEvent<HTMLImageElement>) => {
     const image = calibrationImageRef.current
@@ -300,7 +321,18 @@ export default function Game1Page() {
       </section>}
       {stage === 'calibrating' && <section className={styles.calibration}><div><span className="screen-count">캐릭터 보정 · {Object.keys(calibration).length} / 5</span><h1>캐릭터 얼굴 위치를<br />알려주세요.</h1><p>{currentStep?.description ?? '이미지에서 보이는 방향을 기준으로 왼쪽부터 찍어주세요.'}</p><div className={styles.calibrationSteps}>{calibrationSteps.map((step, index) => <span key={step.key} className={calibration[step.key] ? styles.done : ''}>{index + 1}. 화면 기준 {step.label}</span>)}</div><div className={styles.actions}><Button variant="outline" onClick={undoCalibration} disabled={!Object.keys(calibration).length}>이전 점</Button><Button onClick={beginPlaying} disabled={!calibrationComplete}>보정 완료하고 시작</Button></div></div><div className={styles.calibrationImageWrap}><div className={styles.calibrationImageStage}><img ref={calibrationImageRef} src={calibrationCharacterImage} alt="캐릭터 기준점 설정" onClick={addCalibrationPoint} onLoad={(event) => setCalibrationImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{calibrationSteps.map((step, index) => { const point = calibration[step.key]; return point && calibrationImageSize.width ? <i key={step.key} style={{ left: `${(point.x / calibrationImageSize.width) * 100}%`, top: `${(point.y / calibrationImageSize.height) * 100}%` }}>{index + 1}</i> : null })}</div></div></section>}
       {stage === 'playing' && <section className={styles.playing}><div className={styles.canvasWrap}><canvas ref={canvasRef} aria-label="사과 먹기 게임 화면" /><div className={styles.hud}><strong>사과 <b>{hud.applesEaten}</b> / {APPLE_COUNT}</strong><strong><Clock3 /> {Math.ceil(hud.remainingMs / 1000)}초</strong></div><div className={styles.status}>{hud.faceFound ? (hud.mouthOpen ? '입 열림 · 사과를 먹을 수 있어요!' : '입을 벌려 사과를 먹어보세요') : '얼굴을 찾는 중이에요'}</div></div><Button variant="outline" onClick={() => finishGame('stopped', performance.now() - startedAtRef.current)}>게임 그만하기</Button></section>}
-      {stage === 'result' && result && <section className={styles.result}><Trophy /><span>{result.status === 'success' ? 'GAME CLEAR!' : result.status === 'timeout' ? 'TIME UP' : 'GAME STOPPED'}</span><h1>{result.status === 'success' ? `${formatSeconds(result.elapsedMs)}초 만에 성공!` : `${result.applesEaten}개의 사과를 먹었어요`}</h1><p>{isNewRecord ? '새 최고 기록이에요!' : bestClearMs ? `내 최고 기록은 ${formatSeconds(bestClearMs)}초예요.` : '다시 도전해서 모든 사과를 먹어보세요.'}</p><div className={styles.resultStats}><b>{result.applesEaten}<small>먹은 사과</small></b><b>{formatSeconds(result.elapsedMs)}<small>플레이 시간(초)</small></b></div><div className={styles.actions}><Button variant="outline" size="lg" onClick={() => router.push('/games')}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={() => { setStage('ready'); setResult(null) }}><RotateCcw /> 다시 하기</Button></div></section>}
+      {stage === 'result' && result && <section className={styles.result}><Trophy /><span>{result.status === 'success' ? 'GAME CLEAR!' : result.status === 'timeout' ? 'TIME UP' : 'GAME STOPPED'}</span><h1>{result.status === 'success' ? `${formatSeconds(result.elapsedMs)}초 만에 성공!` : `${result.applesEaten}개의 사과를 먹었어요`}</h1><p>{isNewRecord ? '새 최고 기록이에요!' : bestClearMs ? `내 최고 기록은 ${formatSeconds(bestClearMs)}초예요.` : '다시 도전해서 모든 사과를 먹어보세요.'}</p><div className={styles.resultStats}><b>{result.applesEaten}<small>먹은 사과</small></b><b>{formatSeconds(result.elapsedMs)}<small>플레이 시간(초)</small></b></div>
+      <div className={styles.resourceLabel}><span>자원 소비 현황</span></div>
+      <div className={styles.resultStats}><b>{resourceSummary ? resourceSummary.avgFps : '--'}<small>평균 FPS</small></b><b>{resourceSummary ? resourceSummary.avgFrameMs : '--'}<small>평균 프레임(ms)</small></b><b>{resourceSummary?.avgInferenceMs ?? '--'}<small>평균 추론 시간(ms)</small></b></div>
+      <div className={styles.statsTableWrap}>
+        <div className={styles.resourceLabel}><span>1초마다 자원 사용 현황</span></div>
+        {secondTicks.length > 0 && <ResourceChart ticks={secondTicks} />}
+        {secondTicks.length > 0 ? <table className={styles.statsTable}>
+          <thead><tr><th>초</th><th>평균 FPS</th><th>최대 프레임(ms)</th><th>추론 시간(ms)</th><th>먹은 사과</th></tr></thead>
+          <tbody>{secondTicks.map((tick) => <tr key={tick.second}><td>{tick.second}초</td><td>{tick.avgFps}</td><td>{tick.maxFrameMs}</td><td>{tick.avgInferenceMs ?? '--'}</td><td>{tick.applesEaten.length > 0 ? tick.applesEaten.join(', ') + '번째' : '-'}</td></tr>)}</tbody>
+        </table> : <p>이번 판에서 기록된 자원 사용 데이터가 없어요.</p>}
+      </div>
+      <div className={styles.actions}><Button variant="outline" size="lg" onClick={() => router.push('/games')}><ArrowLeft /> 다른 게임</Button><Button size="lg" onClick={() => { profiler.recordStage('idle'); setStage('ready'); setResult(null); setResourceSummary(null); setSecondTicks([]) }}><RotateCcw /> 다시 하기</Button></div></section>}
     </div>
   </AppShell>
 }
