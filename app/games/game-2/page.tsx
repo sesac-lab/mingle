@@ -34,6 +34,7 @@ type QuizAttempt = {
 };
 
 const GAME_DURATION_MS = 60_000;
+const QUESTION_TIME_LIMIT_MS = 3_000;
 const CORRECT_FEEDBACK_MS = 350;
 const WRONG_FEEDBACK_MS = 800;
 
@@ -298,12 +299,41 @@ export default function Game2Page() {
     questionStartedAtRef.current = performance.now();
   }, [deck.length]);
 
-  const scheduleNextQuestion = (delay: number) => {
+  const scheduleNextQuestion = useCallback((delay: number) => {
     feedbackTimeoutRef.current = setTimeout(() => {
       if (performance.now() >= deadlineRef.current) finishGame();
       else advanceQuestion();
     }, delay);
-  };
+  }, [advanceQuestion, finishGame]);
+
+  useEffect(() => {
+    if (stage !== "playing" || locked || !currentQuestion) return;
+    const timer = setTimeout(() => {
+      const question = currentQuestion;
+      const now = performance.now();
+      const nextWrongStreak = consecutiveWrong + 1;
+      setLocked(true);
+      playAudio("fail");
+      setConsecutiveWrong(nextWrongStreak);
+      setExpression(nextWrongStreak >= 2 ? "angry" : "sad");
+      setCombo(0);
+      setWrongCount((count) => count + 1);
+      setFeedback({ result: "wrong", message: "시간 초과!", answer: question.answer });
+      setAttempts((history) => [...history, {
+        questionId: question.id,
+        submittedAnswer: "",
+        correctAnswer: question.answer,
+        result: "wrong",
+        scoreDelta: 0,
+        totalScore: score,
+        comboAfter: 0,
+        responseTimeMs: QUESTION_TIME_LIMIT_MS,
+        submittedAtMs: GAME_DURATION_MS - Math.max(0, deadlineRef.current - now),
+      }]);
+      scheduleNextQuestion(WRONG_FEEDBACK_MS);
+    }, QUESTION_TIME_LIMIT_MS);
+    return () => clearTimeout(timer);
+  }, [consecutiveWrong, currentQuestion, locked, playAudio, scheduleNextQuestion, score, stage]);
 
   const submitAnswer = (event?: FormEvent) => {
     event?.preventDefault();
@@ -525,6 +555,7 @@ export default function Game2Page() {
           <section className={styles.quizPanel}>
             <div className={styles.quizHeader}><span className="screen-count">PHOTO QUIZ</span><div className={`${styles.timer}${remainingMs <= 10_000 ? ` ${styles.danger}` : ""}`}><Clock3 /> {formatTime(remainingMs)}</div></div>
             <div className={styles.scoreRow}><div className={styles.scoreBox}><small>SCORE</small><b>{score.toLocaleString()}</b></div><div className={styles.scoreBox}><small>COMBO</small><b>{combo}</b></div><div className={styles.scoreBox}><small>CORRECT</small><b>{correctCount}</b></div></div>
+            <div className={styles.questionTimer} aria-hidden="true"><div key={currentQuestion.id} className={styles.questionTimerBar} style={{ animationPlayState: locked ? "paused" : "running" }} /></div>
             <div className={styles.questionFrame}>
               <img src={currentQuestion.image} alt="정답을 맞힐 사진 문제" onError={handleQuestionImageError} />
               {feedback && (
